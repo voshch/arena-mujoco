@@ -73,7 +73,7 @@ All services are on the global `/mujoco/` namespace. `env_id` selects the target
 | `mujoco/PauseSimulation` | `std_srvs/Trigger` | Halt step loop |
 | `mujoco/UnpauseSimulation` | `std_srvs/Trigger` | Resume step loop |
 | `mujoco/Step` | `arena_mujoco_msgs/Step` | Advance all envs by `n` steps (RL determinism) |
-| `mujoco/ResetWorld` | `arena_mujoco_msgs/ResetWorld` | Prefix-delete all bodies for `env_id`, recompile |
+| `mujoco/ResetWorld` | `arena_mujoco_msgs/ResetWorld` | Prefix-delete all bodies for `env_id`, drop its lights, recompile |
 | `mujoco/DeletePrims` | `arena_mujoco_msgs/DeletePrims` | Delete named bodies; trailing `/` triggers prefix delete |
 
 ### World content (via `services` registry)
@@ -86,6 +86,9 @@ All services are on the global `/mujoco/` namespace. `env_id` selects the target
 | `mujoco/SpawnWalls` | `arena_mujoco_msgs/SpawnWalls` | Spawn oriented box walls from start/end points |
 | `mujoco/SpawnFloors` | `arena_mujoco_msgs/SpawnFloors` | Spawn flat floor slabs |
 | `mujoco/SpawnCeilings` | `arena_mujoco_msgs/SpawnCeilings` | Spawn flat ceiling slabs (2 cm thick) |
+| `mujoco/SpawnLights` | `arena_mujoco_msgs/SpawnLights` | Add world lights to the env's light table, no recompile |
+| `mujoco/SetLights` | `arena_mujoco_msgs/SetLights` | Per light, set level and the per-fixture alive mask, or place it at a position turned by a yaw |
+| `mujoco/DeleteLights` | `arena_mujoco_msgs/DeleteLights` | Remove lights by name |
 
 ### Pedestrians (reuse `arena_people_msgs`)
 
@@ -158,7 +161,20 @@ Textures are bound by file, so MuJoCo applies its own image and UV conventions. 
 
 ### Lighting
 
-Each env spec carries a shadowless directional light from above plus a raised headlight ambient term. Ceilings would otherwise put every indoor camera frame in shadow.
+Each env spec carries a shadowless directional light from above plus a raised headlight ambient term. Ceilings would otherwise put every indoor camera frame in shadow. An env that never gets a light renders with exactly that.
+
+World lights (`lights.py`) live in a table per env, outside the model, so spawning, switching, dimming and moving them never recompiles. MuJoCo's renderer shades each vertex with the headlight plus at most seven lights and casts no shadows from point lights, so the table is reduced per view:
+
+- **Declared lights replace the default lighting.** The headlight keeps only an ambient term, half of each dome's light. Lights that objects carry (`intrinsic`) leave the default lighting in place.
+- **Dome and sun.** A dome is that ambient half plus a directional light straight down with the other half. A sun is a directional light along its direction. 400 lux (`REFERENCE_LUX`) of sun shows a material at its full albedo, a dome counts 0.6 (`DOME_GAIN`).
+- **Fixtures.** A spot shines into its cone, a `bulb` all around, every other fixture into the half space it faces, at its lumens over that solid angle, softened by 1 m so nothing blows out next to it. The ceiling above a fixture stays dark, as on the other backends.
+- **Room fill.** A ceiling rig adds the light its room reflects, computed as in the Gazebo backend (40 % reflectance over the surfaces of the room the rig spans) and scaled by 0.35 (`FILL_GAIN`), to the headlight's ambient term while the camera stands over the rig's floor plan. On the lit hospital's robot camera this lands within the spread of the Gazebo and Isaac backends at rig level 0.5 (hallway 51 against 58 and 46, ward 46 against 50 and 75) and with the dome alone (60 against 81 and 45, 46 against 47 and 49). At level 1 the hallway is brighter (98 against 82 and 77), since MuJoCo has no tone mapping to compress highlights.
+- **Reduction.** Fixtures form a binary tree, halved at the median of their widest axis. A view takes the slots left after domes and suns and splits the node that looks largest from its eye until the slots are used, so fixtures near the camera stay apart and a far wing of a building is one lamp at its center carrying the sum of its light.
+- **Where it is applied.** Robot cameras and viewport captures rewrite the lights of their scene after each `update_scene`, each from its own eye. The passive viewer builds its scene itself, so the view from its camera is written into the model's seven lights (`sun` plus six spares every env spec carries) and handed over as a model edit when it changes.
+
+Light does not stop at walls, so a dark room next to a lit one still gets some of its light. `glow` materials are not rendered.
+
+The `light`, `schedule`, `signal` and `sound` semantic kinds attach under `sim:=mujoco`, so a light follows its `light_on` regime and takes `lit`, `level` and `dead_fraction` from `semantics/set` and scenario timelines.
 
 ### Pedestrians (kinematic mocap pool)
 
@@ -264,6 +280,7 @@ The server advertises the viewport contract `arena cam` drives on every sim, und
 - `test_scene.py`: name resolution, prefix deletes, state carry across a recompile, moved static bodies staying moved, the shared clock, the pedestrian pool and its lidar-height capsule, rollback of uncompilable additions.
 - `test_sensors.py`: URDF sensor parsing (joint references included), lidar layout from its URDF element, ray casts that skip the carrier and follow REP 117, a fan cast across threads, camera orientation, depth range and clipping, sensor pose pitch, cloud axes, one shared camera per backing sensor, the fixed near plane, contact pairs and the contact message. The render tests skip without an offscreen GL context.
 - `test_meshes.py`: per-material mesh parts, texture size limit, mesh bodies colliding as convex pieces (a ball rests on a table top and stays under it), rays passing through colliders, prim rescaling, the STL face limit, robot rollback, the material albedo order, one compile per delete burst.
+- `test_lights.py`: default lighting kept or replaced, dome and sun, panels lighting only the half space they face, the room fill of a rig, a large rig reduced to the slots without losing light, finer lamps near the eye, dead fixtures and levels, spot cones and moved lights, the model lights a viewer gets, rendered floor brightness against the fixture's illuminance, the three light services.
 - `test_humans.py`: actor SDF parsing, clip keys, bone poses per clip with the root advance removed, wire joint angles turning bones from the idle stance, skinned vertices matching Isaac's converter and provider, the bone map matching Isaac's, the skin a spawned pedestrian wears as the renderer draws it, rays hitting the capsule under it, wire joints taking precedence over clips, the walk clip advancing by distance and idle when standing, bones and skins leaving with their body.
 
 Run with `arena test arena_mujoco`.

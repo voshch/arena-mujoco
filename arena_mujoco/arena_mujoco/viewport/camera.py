@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import attrs
 import mujoco
 import numpy as np
 
 from .controller import Pose, q_from_euler, q_rotate
+
+if TYPE_CHECKING:
+    from arena_mujoco.lights import Lighting
 
 CAPTURE_WIDTH = 1920
 CAPTURE_HEIGHT = 1080
@@ -74,8 +78,8 @@ def aim(scene: mujoco.MjvScene, model: mujoco.MjModel, pose: Pose, lens: Lens, a
         eye.frustum_far = model.vis.map.zfar * model.stat.extent
 
 
-def render(renderer: mujoco.Renderer, data: mujoco.MjData, pose: Pose, lens: Lens, option: mujoco.MjvOption) -> np.ndarray:
-    """rgb8 frame (height, width, 3) of data seen from pose."""
+def render(renderer: mujoco.Renderer, data: mujoco.MjData, pose: Pose, lens: Lens, option: mujoco.MjvOption, lighting: Lighting | None = None) -> np.ndarray:
+    """rgb8 frame (height, width, 3) of data seen from pose, under lighting when given."""
     camera = mujoco.MjvCamera()
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
     camera.distance = 1.0
@@ -83,4 +87,6 @@ def render(renderer: mujoco.Renderer, data: mujoco.MjData, pose: Pose, lens: Len
     camera.lookat[:] = lookat
     renderer.update_scene(data, camera=camera, scene_option=option)
     aim(renderer.scene, renderer.model, pose, lens, renderer.width / renderer.height)
+    if lighting is not None:
+        lighting.shade(renderer.scene, pose.position)
     return renderer.render()

@@ -1,0 +1,357 @@
+"""World lights of an env, reduced per view to the lights MuJoCo's renderer shades."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+
+import attrs
+import mujoco
+
+Vec = tuple[float, float, float]
+
+SLOTS = 7
+REFERENCE_LUX = 400.0
+REFLECTANCE = 0.4
+FILL_GAIN = 0.35
+DOME_GAIN = 0.6
+DEFAULT_AMBIENT: Vec = (0.5, 0.5, 0.5)
+DEFAULT_DIFFUSE: Vec = (0.4, 0.4, 0.4)
+DEFAULT_SPECULAR: Vec = (0.1, 0.1, 0.1)
+
+_DARK: Vec = (0.0, 0.0, 0.0)
+_DOWN: Vec = (0.0, 0.0, -1.0)
+_SOFTENING_M2 = 1.0
+_DOME_AMBIENT_SHARE = 0.5
+
+
+@attrs.frozen
+class Lamp:
+    """One light as the renderer shades it, colors in units of REFERENCE_LUX."""
+
+    position: Vec
+    direction: Vec
+    diffuse: Vec
+    ambient: Vec = _DARK
+    specular: Vec = _DARK
+    softening: float = _SOFTENING_M2
+    cutoff: float = 180.0
+    directional: bool = False
+    castshadow: bool = False
+
+
+DEFAULT_SUN = Lamp(position=(0.0, 0.0, 10.0), direction=_DOWN, diffuse=(0.7, 0.7, 0.7), specular=(0.3, 0.3, 0.3), directional=True)
+
+
+@attrs.frozen
+class Headlight:
+    """Camera-bound light of a view, its ambient term the only unattenuated fill."""
+
+    ambient: Vec = DEFAULT_AMBIENT
+    diffuse: Vec = DEFAULT_DIFFUSE
+    specular: Vec = DEFAULT_SPECULAR
+
+
+@attrs.define
+class Light:
+    """A declared light: its fixtures and the output they give now."""
+
+    shape: str
+    positions: list[Vec]
+    direction: Vec
+    flux: float
+    color: Vec
+    cone_deg: float = 180.0
+    cast_shadows: bool = False
+    intrinsic: bool = False
+    level: float = 1.0
+    alive: list[bool] = attrs.Factory(list)
+    rig: bool = False
+    yaw: float = 0.0
+
+    @property
+    def ambient(self) -> bool:
+        return self.shape in ('dome', 'distant')
+
+    @property
+    def aim(self) -> Vec:
+        """Emission direction, turned by the yaw of the frame a moved light follows."""
+        x, y, z = self.direction
+        cos_yaw, sin_yaw = math.cos(self.yaw), math.sin(self.yaw)
+        return _unit((cos_yaw * x - sin_yaw * y, sin_yaw * x + cos_yaw * y, z))
+
+    def output(self) -> Vec:
+        """Color of one live fixture times its flux at the current level, in units of REFERENCE_LUX."""
+        gain = max(self.flux, 0.0) * max(self.level, 0.0) / REFERENCE_LUX
+        if self.shape == 'dome':
+            gain *= DOME_GAIN
+        return (self.color[0] * gain, self.color[1] * gain, self.color[2] * gain)
+
+    def live(self) -> list[Vec]:
+        return [position for index, position in enumerate(self.positions) if index >= len(self.alive) or self.alive[index]]
+
+    def fill(self, eye: Vec) -> Vec:
+        """Light the room of a rig reflects off its surfaces, for an eye above its floor plan, in units of REFERENCE_LUX."""
+        if not self.rig or not self.positions:
+            return _DARK
+        xs = [p[0] for p in self.positions]
+        ys = [p[1] for p in self.positions]
+        pitches = [math.dist(a[:2], b[:2]) for i, a in enumerate(self.positions) for b in self.positions[i + 1 :]]
+        pitch = min((d for d in pitches if d > 0.0), default=2.0)
+        if not (min(xs) - pitch / 2.0 <= eye[0] <= max(xs) + pitch / 2.0 and min(ys) - pitch / 2.0 <= eye[1] <= max(ys) + pitch / 2.0):
+            return _DARK
+        length = max(xs) - min(xs) + pitch
+        width = max(ys) - min(ys) + pitch
+        height = self.positions[0][2]
+        surface = 2.0 * (length * width + length * height + width * height)
+        flux = max(self.flux, 0.0) * max(self.level, 0.0) * len(self.live())
+        return _scaled(self.color, FILL_GAIN * REFLECTANCE * flux / (surface * (1.0 - REFLECTANCE)) / REFERENCE_LUX)
+
+
+def _unit(vector: Vec) -> Vec:
+    norm = math.sqrt(vector[0] ** 2 + vector[1] ** 2 + vector[2] ** 2)
+    return _DOWN if norm == 0.0 else (vector[0] / norm, vector[1] / norm, vector[2] / norm)
+
+
+def _scaled(vector: Vec, factor: float) -> Vec:
+    return (vector[0] * factor, vector[1] * factor, vector[2] * factor)
+
+
+@attrs.frozen
+class _Node:
+    """Sources merged into one lamp, split in two for a closer look."""
+
+    center: Vec
+    radius: float
+    spread: float
+    weight: float
+    glow: Vec
+    lamp: Lamp
+    children: tuple[_Node, ...] = ()
+
+
+def _leaf(light: Light, position: Vec) -> _Node:
+    """One fixture: a bulb shines all around, a spot into its cone, any other fixture into the half space it faces."""
+    output = light.output()
+    if light.shape == 'sphere':
+        glow = _scaled(output, 1.0 / (2.0 * math.tau))
+        lamp = Lamp(position=position, direction=_DOWN, diffuse=glow)
+    elif light.cone_deg < 180.0:
+        glow = _scaled(output, 1.0 / math.tau)
+        solid_angle = math.tau * (1.0 - math.cos(math.radians(light.cone_deg) / 2.0))
+        lamp = Lamp(position=position, direction=light.aim, diffuse=_scaled(output, 1.0 / solid_angle), cutoff=light.cone_deg / 2.0, castshadow=light.cast_shadows)
+    else:
+        glow = _scaled(output, 1.0 / math.tau)
+        lamp = Lamp(position=position, direction=light.aim, diffuse=glow, cutoff=90.0)
+    return _Node(center=position, radius=0.0, spread=0.0, weight=sum(glow), glow=glow, lamp=lamp)
+
+
+def _merge(first: _Node, second: _Node) -> _Node:
+    weight = first.weight + second.weight
+    share = second.weight / weight
+    center = tuple(a + (b - a) * share for a, b in zip(first.center, second.center, strict=True))
+    to_first, to_second = math.dist(center, first.center), math.dist(center, second.center)
+    spread = (first.weight * (first.spread + to_first**2) + second.weight * (second.spread + to_second**2)) / weight
+    glow = tuple(a + b for a, b in zip(first.glow, second.glow, strict=True))
+    return _Node(
+        center=center,
+        radius=max(to_first + first.radius, to_second + second.radius),
+        spread=spread,
+        weight=weight,
+        glow=glow,
+        lamp=Lamp(position=center, direction=_DOWN, diffuse=glow, softening=_SOFTENING_M2 + spread, cutoff=max(first.lamp.cutoff, second.lamp.cutoff, 90.0)),
+        children=(first, second),
+    )
+
+
+def _grow(leaves: list[_Node]) -> _Node:
+    """Binary tree over leaves, halved at the median of their widest axis."""
+    if len(leaves) == 1:
+        return leaves[0]
+    axis = max(range(3), key=lambda i: max(leaf.center[i] for leaf in leaves) - min(leaf.center[i] for leaf in leaves))
+    leaves = sorted(leaves, key=lambda leaf: leaf.center[axis])
+    half = len(leaves) // 2
+    return _merge(_grow(leaves[:half]), _grow(leaves[half:]))
+
+
+def _cut(root: _Node, eye: Vec, budget: int) -> list[_Node]:
+    """At most budget nodes covering root, the ones that look largest from eye split first."""
+    picked = [root]
+    while len(picked) < budget:
+        splittable = [node for node in picked if node.children]
+        if not splittable:
+            break
+        largest = max(splittable, key=lambda node: node.radius / (1.0 + max(math.dist(eye, node.center) - node.radius, 0.0)))
+        picked.remove(largest)
+        picked.extend(largest.children)
+    return picked
+
+
+class Lighting:
+    """Lights of one env and the view of them a camera at a given eye gets."""
+
+    def __init__(self) -> None:
+        self._lights: dict[str, Light] = {}
+        self._root: _Node | None = None
+        self._grown = False
+        self._touched = False
+        self._dressed: tuple[mujoco.MjModel, Headlight, list[Lamp]] | None = None
+
+    def _changed(self) -> None:
+        self._grown = False
+        self._touched = True
+
+    def spawn(self, name: str, light: Light) -> None:
+        self._lights[name] = light
+        self._changed()
+
+    def remove(self, name: str) -> bool:
+        if self._lights.pop(name, None) is None:
+            return False
+        self._changed()
+        return True
+
+    def clear(self) -> None:
+        if self._lights:
+            self._lights.clear()
+            self._changed()
+
+    def set_output(self, name: str, level: float, alive: Sequence[bool]) -> bool:
+        light = self._lights.get(name)
+        if light is None:
+            return False
+        light.level = level
+        light.alive = list(alive)
+        self._changed()
+        return True
+
+    def move(self, name: str, position: Vec, yaw: float) -> bool:
+        light = self._lights.get(name)
+        if light is None or light.ambient:
+            return False
+        light.positions = [position]
+        light.yaw = yaw
+        self._changed()
+        return True
+
+    @property
+    def declared(self) -> bool:
+        """Whether a light replaces the default lighting, lights that objects carry do not."""
+        return any(not light.intrinsic for light in self._lights.values())
+
+    def headlight(self, eye: Vec) -> Headlight:
+        """Default headlight, or once lights are declared only an ambient term: half of each dome plus the fill of the rigs whose floor plan the eye is over."""
+        if not self.declared:
+            return Headlight()
+        ambient = [0.0, 0.0, 0.0]
+        for light in self._lights.values():
+            share = _scaled(light.output(), _DOME_AMBIENT_SHARE) if light.shape == 'dome' else light.fill(eye)
+            for channel, value in enumerate(share):
+                ambient[channel] += value
+        return Headlight(ambient=(ambient[0], ambient[1], ambient[2]), diffuse=_DARK, specular=_DARK)
+
+    def _distant(self) -> list[Lamp]:
+        """Lamps without a place: the default sun of an env that declares no light, else its suns and the downward half of its domes."""
+        if not self.declared:
+            return [DEFAULT_SUN]
+        lamps: list[Lamp] = []
+        for light in self._lights.values():
+            output = light.output()
+            if not any(output):
+                continue
+            if light.shape == 'distant':
+                lamps.append(Lamp(position=DEFAULT_SUN.position, direction=light.aim, diffuse=output, directional=True, castshadow=light.cast_shadows))
+            elif light.shape == 'dome':
+                lamps.append(Lamp(position=DEFAULT_SUN.position, direction=_DOWN, diffuse=_scaled(output, 1.0 - _DOME_AMBIENT_SHARE), directional=True))
+        return lamps[:SLOTS]
+
+    def _tree(self) -> _Node | None:
+        if not self._grown:
+            leaves = [_leaf(light, position) for light in self._lights.values() if not light.ambient and any(light.output()) for position in light.live()]
+            self._root = _grow(leaves) if leaves else None
+            self._grown = True
+        return self._root
+
+    def lamps(self, eye: Vec) -> list[Lamp]:
+        """The SLOTS lamps a camera at eye is shaded with: distant ones first, the rest merged the coarser the smaller they look."""
+        lamps = self._distant()
+        root = self._tree()
+        if root is not None and len(lamps) < SLOTS:
+            lamps.extend(node.lamp for node in _cut(root, eye, SLOTS - len(lamps)))
+        return lamps
+
+    def shade(self, scene: mujoco.MjvScene, eye: Vec) -> None:
+        """Replace the lights of a scene freshly updated from the model, untouched while the env never had a light."""
+        if not self._touched:
+            return
+        first = 0
+        if scene.nlight and scene.lights[0].headlight:
+            head = self.headlight(eye)
+            scene.lights[0].ambient[:] = head.ambient
+            scene.lights[0].diffuse[:] = head.diffuse
+            scene.lights[0].specular[:] = head.specular
+            first = 1
+        lamps = self.lamps(eye)
+        for index, lamp in enumerate(lamps):
+            target = scene.lights[first + index]
+            target.pos[:] = lamp.position
+            target.dir[:] = lamp.direction
+            target.type = _kind(lamp)
+            target.texid = -1
+            target.attenuation[:] = _attenuation(lamp)
+            target.cutoff = lamp.cutoff
+            target.exponent = 0.0
+            target.ambient[:] = lamp.ambient
+            target.diffuse[:] = lamp.diffuse
+            target.specular[:] = lamp.specular
+            target.headlight = 0
+            target.castshadow = int(lamp.castshadow)
+        scene.nlight = first + len(lamps)
+
+    def dress(self, model: mujoco.MjModel, data: mujoco.MjData, eye: Vec) -> bool:
+        """Write the view from eye into the model's own lights, for a viewer that builds its scene itself. True when the model changed."""
+        if not self._touched:
+            return False
+        head = self.headlight(eye)
+        lamps = self.lamps(eye)
+        if self._dressed is not None and self._dressed[0] is model and self._dressed[1:] == (head, lamps):
+            return False
+        self._dressed = (model, head, lamps)
+        model.vis.headlight.ambient[:] = head.ambient
+        model.vis.headlight.diffuse[:] = head.diffuse
+        model.vis.headlight.specular[:] = head.specular
+        model.light_active[:] = 0
+        for index, lamp in enumerate(lamps[: model.nlight]):
+            model.light_pos[index] = lamp.position
+            model.light_dir[index] = lamp.direction
+            data.light_xpos[index] = lamp.position
+            data.light_xdir[index] = lamp.direction
+            model.light_type[index] = _kind(lamp)
+            model.light_attenuation[index] = _attenuation(lamp)
+            model.light_cutoff[index] = lamp.cutoff
+            model.light_exponent[index] = 0.0
+            model.light_ambient[index] = lamp.ambient
+            model.light_diffuse[index] = lamp.diffuse
+            model.light_specular[index] = lamp.specular
+            model.light_castshadow[index] = lamp.castshadow
+            model.light_active[index] = 1
+        return True
+
+
+def _kind(lamp: Lamp) -> int:
+    return int(mujoco.mjtLightType.mjLIGHT_DIRECTIONAL if lamp.directional else mujoco.mjtLightType.mjLIGHT_SPOT)
+
+
+def _attenuation(lamp: Lamp) -> Vec:
+    return (1.0, 0.0, 0.0) if lamp.directional else (lamp.softening, 0.0, 1.0)
+
+
+_lightings: dict[int, Lighting] = {}
+
+
+def lighting(env_id: int) -> Lighting:
+    """The lighting of env_id, empty until a light is spawned into it."""
+    return _lightings.setdefault(env_id, Lighting())
+
+
+__all__ = ['DEFAULT_AMBIENT', 'DEFAULT_DIFFUSE', 'DEFAULT_SPECULAR', 'DEFAULT_SUN', 'DOME_GAIN', 'FILL_GAIN', 'REFERENCE_LUX', 'REFLECTANCE', 'SLOTS', 'Headlight', 'Lamp', 'Light', 'Lighting', 'lighting']

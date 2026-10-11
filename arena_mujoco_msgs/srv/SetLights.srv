@@ -1,0 +1,4 @@
+uint32 env_id
+LightState[] states
+---
+bool[] ret

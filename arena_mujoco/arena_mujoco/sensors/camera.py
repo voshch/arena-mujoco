@@ -13,6 +13,7 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 
 from arena_mujoco.context import get_scene_store
+from arena_mujoco.lights import lighting
 from arena_mujoco.sensors.core import SensorPublisher, get_renderer, make_stamp, register_sensor, sensor_pose
 
 if TYPE_CHECKING:
@@ -99,6 +100,7 @@ class CameraRig:
             return None
         if self._color is None:
             renderer.update_scene(data, camera=self._camera_id)
+            lighting(self.env_id).shade(renderer.scene, tuple(data.cam_xpos[self._camera_id]))
             self._color = renderer.render()
         return self._color
 

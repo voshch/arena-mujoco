@@ -23,6 +23,7 @@ import arena_mujoco.control  # noqa: F401, E402 (registers pre_compile + post_sp
 import arena_mujoco.odom  # noqa: F401, E402 (registers post_spawn + pump hooks at import time)
 import arena_mujoco.sensors  # noqa: E402
 from arena_mujoco import context, hooks  # noqa: E402
+from arena_mujoco.lights import lighting  # noqa: E402
 from arena_mujoco.scene import PHYSICS_DT, SceneStore  # noqa: E402
 from arena_mujoco.services import services  # noqa: E402
 from arena_mujoco.services.SpawnCeilings import CEILING_GROUP  # noqa: E402
@@ -161,6 +162,7 @@ class MujocoController(rclpy.node.Node):
         forget_robots(env_id, '')
         self._scene_store.remove_by_prefix(env_id, '')
         reset_env(env_id)
+        lighting(env_id).clear()
         self._scene_store.recompile(env_id)
         response.ret = True
         return response
@@ -175,6 +177,8 @@ class MujocoController(rclpy.node.Node):
         ret: list[bool] = []
         for name in request.names:
             forget_robots(env_id, name)
+            if name.rstrip('/') == f'env_{env_id}':
+                lighting(env_id).clear()
             if name.endswith('/'):
                 release_pedestrians(name)
                 ret.append(self._scene_store.remove_by_prefix(env_id, name[:-1]) > 0)
@@ -244,6 +248,8 @@ class MujocoController(rclpy.node.Node):
             return
         if not self._viewer_idle.is_set():
             return
+        if lighting(_VIEWER_ENV).dress(model, data, self._viewport.eye):
+            self._scene_store.note_model_edit(_VIEWER_ENV)
         shown = self._viewer_frame[1] if self._viewer_frame[0] is model else mujoco.MjData(model)
         mujoco.mj_copyData(shown, model, data)
         self._viewer_frame = (model, shown, self._scene_store.model_edits(_VIEWER_ENV))

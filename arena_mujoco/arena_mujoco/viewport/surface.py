@@ -16,6 +16,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from viewport_control_msgs.msg import ViewportView
 from viewport_control_msgs.srv import ViewportCapture, ViewportSetProjection, ViewportSetReferenceFrame, ViewportSetView
 
+from arena_mujoco.lights import lighting
 from arena_mujoco.sensors.core import get_renderer, make_stamp
 from arena_mujoco.services.SpawnCeilings import CEILING_GROUP
 from arena_mujoco.services.SpawnUrdf import frame_body
@@ -74,6 +75,11 @@ class Viewport:
         node.create_subscription(ViewportView, f'{NAMESPACE}/cmd_view', self._cb_cmd_view, STREAM_QOS)
         self._pose_pub = node.create_publisher(geometry_msgs.msg.PoseStamped, f'{NAMESPACE}/camera_pose', 10)
 
+    @property
+    def eye(self) -> tuple[float, float, float]:
+        """Where the camera stood on the last apply."""
+        return self._pose.position
+
     def _now(self) -> float:
         return self._node.get_clock().now().nanoseconds * 1e-9
 
@@ -125,7 +131,7 @@ class Viewport:
             response.success = False
             response.message = 'no offscreen renderer for the viewport'
             return response
-        pixels = render(renderer, data, self._pose, self._lens, self._option)
+        pixels = render(renderer, data, self._pose, self._lens, self._option, lighting(self._env_id))
         image = sensor_msgs.msg.Image()
         image.header.stamp = make_stamp(self._store.time)
         image.header.frame_id = POSE_FRAME

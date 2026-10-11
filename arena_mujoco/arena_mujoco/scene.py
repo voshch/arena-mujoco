@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import mujoco
 import numpy as np
 
+from arena_mujoco.lights import DEFAULT_AMBIENT, DEFAULT_DIFFUSE, DEFAULT_SPECULAR, DEFAULT_SUN, SLOTS
 from arena_mujoco.viewport.camera import CAPTURE_HEIGHT, CAPTURE_WIDTH
 
 _ID_BAD = re.compile(r'[^0-9A-Za-z_]+')
@@ -104,7 +105,7 @@ class _EnvScene:
 
 
 def _new_world_spec() -> mujoco.MjSpec:
-    """Build a fresh spec with a ground plane and default lighting."""
+    """Build a fresh spec with a ground plane, the default lighting and the spare lights world lights are written into."""
     spec = mujoco.MjSpec()
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
     spec.option.timestep = PHYSICS_DT
@@ -112,9 +113,9 @@ def _new_world_spec() -> mujoco.MjSpec:
     spec.visual.map.znear = _RENDER_ZNEAR_M / _RENDER_EXTENT_M
     spec.visual.global_.offwidth = CAPTURE_WIDTH
     spec.visual.global_.offheight = CAPTURE_HEIGHT
-    spec.visual.headlight.ambient = [0.5, 0.5, 0.5]
-    spec.visual.headlight.diffuse = [0.4, 0.4, 0.4]
-    spec.visual.headlight.specular = [0.1, 0.1, 0.1]
+    spec.visual.headlight.ambient = list(DEFAULT_AMBIENT)
+    spec.visual.headlight.diffuse = list(DEFAULT_DIFFUSE)
+    spec.visual.headlight.specular = list(DEFAULT_SPECULAR)
     spec.worldbody.add_geom(
         name='ground',
         type=mujoco.mjtGeom.mjGEOM_PLANE,
@@ -123,11 +124,15 @@ def _new_world_spec() -> mujoco.MjSpec:
     )
     spec.worldbody.add_light(
         name='sun',
-        pos=[0.0, 0.0, 10.0],
-        dir=[0.0, 0.0, -1.0],
+        pos=list(DEFAULT_SUN.position),
+        dir=list(DEFAULT_SUN.direction),
         type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
+        diffuse=list(DEFAULT_SUN.diffuse),
+        specular=list(DEFAULT_SUN.specular),
         castshadow=False,
     )
+    for slot in range(1, SLOTS):
+        spec.worldbody.add_light(name=f'light_{slot}', active=False, castshadow=False)
     return spec
 
 
@@ -360,6 +365,12 @@ class SceneStore:
         """Count of in-place edits to env_id's compiled model, 0 if absent."""
         scene = self._envs.get(env_id)
         return 0 if scene is None else scene.model_edits
+
+    def note_model_edit(self, env_id: int) -> None:
+        """Count an in-place edit made to env_id's compiled model from outside the store."""
+        scene = self._envs.get(env_id)
+        if scene is not None:
+            scene.model_edits += 1
 
     def asset_cache(self, env_id: int) -> AssetCache:
         """Return the per-env asset dedup cache for env_id, raises KeyError if absent."""
