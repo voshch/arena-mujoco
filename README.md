@@ -174,7 +174,9 @@ World lights (`lights.py`) live in a table per env, outside the model, so spawni
 
 Light does not stop at walls, so a dark room next to a lit one still gets some of its light. `glow` materials are not rendered.
 
-The `light`, `schedule`, `signal` and `sound` semantic kinds attach under `sim:=mujoco`, so a light follows its `light_on` regime and takes `lit`, `level` and `dead_fraction` from `semantics/set` and scenario timelines.
+### Doors, elevators and semantic kinds
+
+Every semantic kind attaches under `sim:=mujoco`. Doors and elevator cabins are static boxes that the shared mechanism tick moves through `move_box` (`EditPrims`), so they open for robots and pedestrians as on the other backends, a gate keeps its door shut while locked, a pressure plate drives its door, an occupancy cap counts the agents in its zone, an elevator carries its riders to the destination cabin, and a light follows its `light_on` regime. A moving door edits the compiled model in place, so while the passive viewer is open each animation frame hands it the whole model: in hospital_1 the viewer drops from 60 to a median of 44 fps while a door moves.
 
 ### Pedestrians (kinematic mocap pool)
 
