@@ -5,7 +5,7 @@ from __future__ import annotations
 from arena_mujoco_msgs.msg import Light as LightMsg
 from arena_mujoco_msgs.srv import DeleteLights, SetLights, SpawnLights
 
-from arena_mujoco.lights import Light, lighting
+from arena_mujoco.lights import Light, glow_material, lighting
 
 from .utils import Service
 
@@ -23,6 +23,7 @@ def _light(msg: LightMsg) -> Light:
         level=float(msg.level),
         alive=[bool(alive) for alive in msg.alive],
         rig=bool(msg.rig),
+        glow=glow_material(msg.owner, msg.glow) if msg.glow else '',
     )
 
 

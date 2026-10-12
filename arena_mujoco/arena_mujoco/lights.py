@@ -21,6 +21,9 @@ DEFAULT_SPECULAR: Vec = (0.1, 0.1, 0.1)
 
 _DARK: Vec = (0.0, 0.0, 0.0)
 _DOWN: Vec = (0.0, 0.0, -1.0)
+GLOW_RESPONSE = 0.65
+
+GLOW_SEPARATOR = ':glow_'
 _SOFTENING_M2 = 1.0
 _DOME_AMBIENT_SHARE = 0.5
 
@@ -67,6 +70,7 @@ class Light:
     level: float = 1.0
     alive: list[bool] = attrs.Factory(list)
     rig: bool = False
+    glow: str = ''
     yaw: float = 0.0
 
     @property
@@ -89,6 +93,10 @@ class Light:
 
     def live(self) -> list[Vec]:
         return [position for index, position in enumerate(self.positions) if index >= len(self.alive) or self.alive[index]]
+
+    def glow_level(self) -> float:
+        """Emission of the glow material, zero while the light is off or its fixture dead."""
+        return max(self.level, 0.0) ** GLOW_RESPONSE if self.live() else 0.0
 
     def fill(self, eye: Vec) -> Vec:
         """Light the room of a rig reflects off its surfaces, for an eye above its floor plan, in units of REFERENCE_LUX."""
@@ -196,6 +204,8 @@ class Lighting:
         self._grown = False
         self._touched = False
         self._dressed: tuple[mujoco.MjModel, Headlight, list[Lamp]] | None = None
+        self._glowed: tuple[mujoco.MjModel, tuple] | None = None
+        self._glow_bases: dict[int, tuple[float, float, float, float]] = {}
 
     def _changed(self) -> None:
         self._grown = False
@@ -309,13 +319,14 @@ class Lighting:
         scene.nlight = first + len(lamps)
 
     def dress(self, model: mujoco.MjModel, data: mujoco.MjData, eye: Vec) -> bool:
-        """Write the view from eye into the model's own lights, for a viewer that builds its scene itself. True when the model changed."""
+        """Write the view from eye into the model's own lights and glow materials, for a viewer that builds its scene itself. True when the model changed."""
         if not self._touched:
             return False
+        glowed = self.glow(model)
         head = self.headlight(eye)
         lamps = self.lamps(eye)
         if self._dressed is not None and self._dressed[0] is model and self._dressed[1:] == (head, lamps):
-            return False
+            return glowed
         self._dressed = (model, head, lamps)
         model.vis.headlight.ambient[:] = head.ambient
         model.vis.headlight.diffuse[:] = head.diffuse
@@ -337,6 +348,32 @@ class Lighting:
             model.light_active[index] = 1
         return True
 
+    def glow(self, model: mujoco.MjModel) -> bool:
+        """Make the glow materials in model emit the color of their light at its level, back to their own color while it is off. True when the model changed."""
+        if not self._touched:
+            return False
+        state = tuple((light.glow, light.glow_level(), light.color) for light in self._lights.values() if light.glow)
+        if self._glowed is not None and self._glowed[0] is model and self._glowed[1] == state:
+            return False
+        if self._glowed is None or self._glowed[0] is not model:
+            self._glow_bases = {index: tuple(model.mat_rgba[index]) for index in range(model.nmat) if GLOW_SEPARATOR in model.material(index).name}
+        self._glowed = (model, state)
+        lit: dict[int, tuple[float, Vec]] = {}
+        for prefix, level, color in state:
+            for index in self._glow_bases:
+                if model.material(index).name.startswith(f'{prefix}/'):
+                    lit[index] = (level, color)
+        for index, base in self._glow_bases.items():
+            level, color = lit.get(index, (0.0, _DARK))
+            model.mat_emission[index] = level
+            model.mat_rgba[index] = (*color, base[3]) if level > 0.0 else base
+        return True
+
+
+def glow_material(owner: str, glow: str) -> str:
+    """Name prefix of the materials of owner's glow material, one per mesh part below it."""
+    return f'{owner}{GLOW_SEPARATOR}{glow}'
+
 
 def _kind(lamp: Lamp) -> int:
     return int(mujoco.mjtLightType.mjLIGHT_DIRECTIONAL if lamp.directional else mujoco.mjtLightType.mjLIGHT_SPOT)
@@ -354,4 +391,4 @@ def lighting(env_id: int) -> Lighting:
     return _lightings.setdefault(env_id, Lighting())
 
 
-__all__ = ['DEFAULT_AMBIENT', 'DEFAULT_DIFFUSE', 'DEFAULT_SPECULAR', 'DEFAULT_SUN', 'DOME_GAIN', 'FILL_GAIN', 'REFERENCE_LUX', 'REFLECTANCE', 'SLOTS', 'Headlight', 'Lamp', 'Light', 'Lighting', 'lighting']
+__all__ = ['DEFAULT_AMBIENT', 'DEFAULT_DIFFUSE', 'DEFAULT_SPECULAR', 'DEFAULT_SUN', 'DOME_GAIN', 'FILL_GAIN', 'GLOW_RESPONSE', 'GLOW_SEPARATOR', 'REFERENCE_LUX', 'REFLECTANCE', 'SLOTS', 'Headlight', 'Lamp', 'Light', 'Lighting', 'glow_material', 'lighting']

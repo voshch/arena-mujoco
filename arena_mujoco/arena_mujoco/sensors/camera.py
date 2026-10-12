@@ -99,6 +99,7 @@ class CameraRig:
         if renderer is None:
             return None
         if self._color is None:
+            lighting(self.env_id).glow(model)
             renderer.update_scene(data, camera=self._camera_id)
             lighting(self.env_id).shade(renderer.scene, tuple(data.cam_xpos[self._camera_id]))
             self._color = renderer.render()

@@ -1,15 +1,21 @@
 import math
+from pathlib import Path
 
 import mujoco
+import numpy as np
 import pytest
+import trimesh
 from arena_mujoco_msgs.msg import Light as LightMsg
-from arena_mujoco_msgs.msg import LightState
+from arena_mujoco_msgs.msg import LightState, Prim, PrimVisual, Scale
 from arena_mujoco_msgs.srv import DeleteLights, SetLights, SpawnLights
-from geometry_msgs.msg import Point, Vector3
+from geometry_msgs.msg import Point, Pose, Vector3
 
-from arena_mujoco.lights import DEFAULT_SUN, DOME_GAIN, FILL_GAIN, REFERENCE_LUX, REFLECTANCE, SLOTS, Headlight, Light, Lighting, lighting
+from arena_mujoco import context
+from arena_mujoco.lights import DEFAULT_SUN, DOME_GAIN, FILL_GAIN, GLOW_RESPONSE, REFERENCE_LUX, REFLECTANCE, SLOTS, Headlight, Light, Lighting, glow_material, lighting
+from arena_mujoco.mesh_mat import COLLISION_GROUP
 from arena_mujoco.scene import SceneStore
 from arena_mujoco.services.Lights import _delete_lights_cb, _set_lights_cb, _spawn_lights_cb
+from arena_mujoco.services.SpawnPrims import _add_prim
 
 _WHITE = (1.0, 1.0, 1.0)
 _DOWN = (0.0, 0.0, -1.0)
@@ -242,3 +248,108 @@ def test_light_services_spawn_set_and_delete_per_env():
 
     assert list(_delete_lights_cb(DeleteLights.Request(env_id=env_id, names=['room', 'room']), DeleteLights.Response()).ret) == [True, False]
     assert lighting(env_id).lamps(eye) == [DEFAULT_SUN]
+
+
+_SHADE = (0.85, 0.8, 0.7, 1.0)
+_WARM = (1.0, 0.7, 0.4)
+
+
+def _box_glb(path: Path, extents: tuple[float, float, float], center: tuple[float, float, float], rgba: tuple[float, float, float, float]) -> str:
+    box = trimesh.creation.box(extents=extents)
+    box.apply_translation(center)
+    box.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(baseColorFactor=[int(c * 255) for c in rgba]))
+    box.export(str(path))
+    return str(path)
+
+
+@pytest.fixture
+def lamps(tmp_path: Path) -> SceneStore:
+    store = SceneStore()
+    store.ensure_env(0)
+    context.set_scene_store(store)
+    stand = _box_glb(tmp_path / 'lamp.glb', (0.1, 0.1, 1.0), (0.0, 0.0, 0.5), (0.2, 0.2, 0.2, 1.0))
+    shade = _box_glb(tmp_path / 'lamp.glow_0.glb', (0.4, 0.4, 0.3), (0.0, 0.0, 1.15), _SHADE)
+    for name, x in (('lamp_a', 0.0), ('lamp_b', 2.0)):
+        prim = Prim(name=name, pose=Pose(position=Point(x=x)), scale=Scale(x=1.0, y=1.0, z=1.0), mesh_path=stand, visuals=[PrimVisual(name='glow_Shade', mesh_path=shade)])
+        prim.pose.orientation.w = 1.0
+        assert _add_prim(0, prim)
+    store.recompile(0)
+    return store
+
+
+def _glow_ids(model: mujoco.MjModel, owner: str) -> list[int]:
+    return [index for index in range(model.nmat) if model.material(index).name.startswith(f'{glow_material(owner, "Shade")}/')]
+
+
+def test_each_lamp_glows_with_its_own_light_and_is_its_own_color_while_off(lamps: SceneStore):
+    model = lamps.get_model(0)
+    (a,), (b,) = _glow_ids(model, 'lamp_a'), _glow_ids(model, 'lamp_b')
+    assert tuple(model.mat_rgba[a]) == pytest.approx(_SHADE, abs=0.01)
+    lamp_bodies = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in ('lamp_a', 'lamp_b')]
+    for body in lamp_bodies:
+        geoms = range(model.body_geomadr[body], model.body_geomadr[body] + model.body_geomnum[body])
+        assert sum(model.geom_group[g] == 0 for g in geoms) == 2
+        assert sum(model.geom_group[g] == COLLISION_GROUP for g in geoms) >= 2
+
+    env = Lighting()
+    assert not env.glow(model)
+    env.spawn('a', Light(shape='sphere', positions=[(0.0, 0.0, 1.1)], direction=(0.0, 0.0, -1.0), flux=800.0, color=_WARM, intrinsic=True, glow=glow_material('lamp_a', 'Shade')))
+    env.spawn('b', Light(shape='sphere', positions=[(2.0, 0.0, 1.1)], direction=(0.0, 0.0, -1.0), flux=800.0, color=_WARM, intrinsic=True, level=0.0, glow=glow_material('lamp_b', 'Shade')))
+    assert env.glow(model)
+    assert not env.glow(model)
+    assert (model.mat_emission[a], model.mat_emission[b]) == (1.0, 0.0)
+    assert tuple(model.mat_rgba[a]) == pytest.approx((*_WARM, 1.0))
+    assert tuple(model.mat_rgba[b]) == pytest.approx(_SHADE, abs=0.01)
+
+    env.set_output('a', 0.3, [])
+    assert env.glow(model)
+    assert model.mat_emission[a] == pytest.approx(0.3**GLOW_RESPONSE)
+    env.set_output('a', 1.0, [False])
+    assert env.glow(model)
+    assert model.mat_emission[a] == 0.0
+    assert tuple(model.mat_rgba[a]) == pytest.approx(_SHADE, abs=0.01)
+
+    env.set_output('b', 1.0, [])
+    env.remove('a')
+    lamps.add_body(0, lambda spec: spec.worldbody.add_body(name='late'))
+    lamps.recompile(0)
+    fresh = lamps.get_model(0)
+    assert env.dress(fresh, lamps.get_data(0), (0.0, 0.0, 1.0))
+    (a,), (b,) = _glow_ids(fresh, 'lamp_a'), _glow_ids(fresh, 'lamp_b')
+    assert (fresh.mat_emission[a], fresh.mat_emission[b]) == (0.0, 1.0)
+
+
+def test_glowing_shade_renders_bright_in_the_dark_and_black_when_off(lamps: SceneStore):
+    model, data = lamps.get_model(0), lamps.get_data(0)
+    try:
+        renderer = mujoco.Renderer(model, _SIZE, _SIZE)
+    except Exception as exc:
+        pytest.skip(f'no offscreen GL: {exc}')
+    camera = mujoco.MjvCamera()
+    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    camera.lookat[:] = (0.0, 0.0, 1.15)
+    camera.distance = 1.0
+    camera.elevation = 0.0
+    env = Lighting()
+    env.spawn('night', Light(shape='dome', positions=[], direction=(0.0, 0.0, -1.0), flux=400.0, color=(1.0, 1.0, 1.0), level=0.0))
+    env.spawn('a', Light(shape='sphere', positions=[(0.0, 0.0, 3.0)], direction=(0.0, 0.0, -1.0), flux=0.0, color=_WARM, intrinsic=True, glow=glow_material('lamp_a', 'Shade')))
+
+    def center() -> np.ndarray:
+        env.glow(model)
+        renderer.update_scene(data, camera)
+        env.shade(renderer.scene, (1.0, 0.0, 1.15))
+        return renderer.render()[_SIZE // 2, _SIZE // 2].astype(float)
+
+    lit = center()
+    assert lit == pytest.approx([c * 255.0 for c in _WARM], abs=3.0)
+    env.set_output('a', 0.0, [])
+    assert center().max() == 0.0
+    renderer.close()
+
+
+def test_light_service_names_the_glow_material_of_its_owner():
+    env_id = 43
+    light = LightMsg(name='lamp_light', shape='sphere', positions=[Point(z=1.1)], direction=Vector3(z=-1.0), flux=800.0, color=[1.0, 0.7, 0.4], level=1.0, intrinsic=True, glow='Shade', owner='env_43/lamp')
+    plain = LightMsg(name='room', shape='rect', positions=[Point(z=2.6)], direction=Vector3(z=-1.0), flux=3600.0, color=[1.0, 1.0, 1.0], level=1.0)
+    assert list(_spawn_lights_cb(SpawnLights.Request(env_id=env_id, lights=[light, plain]), SpawnLights.Response()).ret) == [True, True]
+    assert {name: entry.glow for name, entry in lighting(env_id)._lights.items()} == {'lamp_light': glow_material('env_43/lamp', 'Shade'), 'room': ''}

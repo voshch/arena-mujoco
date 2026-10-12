@@ -19,3 +19,7 @@ bool[] alive
 bool intrinsic
 # true => a zone ceiling rig, which adds a room fill
 bool rig
+# material of owner glowing with the light, empty => none
+string glow
+# prim that carries the glow material
+string owner

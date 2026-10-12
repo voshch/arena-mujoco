@@ -85,6 +85,8 @@ def render(renderer: mujoco.Renderer, data: mujoco.MjData, pose: Pose, lens: Len
     camera.distance = 1.0
     lookat, camera.azimuth, camera.elevation = orbit_of(pose, camera.distance)
     camera.lookat[:] = lookat
+    if lighting is not None:
+        lighting.glow(renderer.model)
     renderer.update_scene(data, camera=camera, scene_option=option)
     aim(renderer.scene, renderer.model, pose, lens, renderer.width / renderer.height)
     if lighting is not None:

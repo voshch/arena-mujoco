@@ -20,6 +20,8 @@ import numpy as np
 from arena_simulation_setup.utils.material import MdlUtil
 from PIL import Image
 
+from arena_mujoco.lights import glow_material
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
@@ -40,6 +42,7 @@ _MAX_HULLS = 16
 _MAX_HULL_VERTICES = 32
 _HULL_WORKERS = min(8, os.cpu_count() or 1)
 COLLISION_GROUP = 3
+GLOW_VISUAL_PREFIX = 'glow_'
 _MAX_TEXTURE_PX = 1024
 _MIN_BOX_M = 1e-3
 
@@ -519,6 +522,28 @@ def add_part_geoms(
     return geoms
 
 
+def add_glow_geoms(
+    spec: mujoco.MjSpec,
+    cache: AssetCache,
+    body: mujoco.MjsBody,
+    prefix: str,
+    parts: Sequence[MeshPart],
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> None:
+    """Add one visual mesh geom per part to body, each in a material of its own named prefix/<index> for its light to set the emission of."""
+    for index, part in enumerate(parts):
+        material = spec.add_material(name=f'{prefix}/{index}')
+        material.rgba = list(part.rgba if part.rgba is not None else (1.0, 1.0, 1.0, 1.0))
+        if part.texture is not None:
+            material.textures[mujoco.mjtTextureRole.mjTEXROLE_RGB] = spec.material(ensure_texture_material(spec, cache, part.texture, tiled=False)).textures[mujoco.mjtTextureRole.mjTEXROLE_RGB]
+        geom = body.add_geom()
+        geom.type = mujoco.mjtGeom.mjGEOM_MESH
+        geom.meshname = _mesh_asset(spec, cache, 'mesh', part.file, scale)
+        geom.material = cache.add(None, material)
+        geom.contype = 0
+        geom.conaffinity = 0
+
+
 def add_hull_geoms(
     spec: mujoco.MjSpec,
     cache: AssetCache,
@@ -568,22 +593,32 @@ def add_mesh_body(
     quat: tuple[float, float, float, float],
     mesh_path: str,
     scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    visuals: Sequence[tuple[str, str]] = (),
 ) -> mujoco.MjsBody:
-    """Add a static body that looks like mesh_path and collides as its convex decomposition."""
+    """Add a static body that looks like mesh_path and its further (visual name, mesh file) visuals and collides as their convex decomposition, a glow_<material> visual in materials its light glows."""
     body = spec.worldbody.add_body()
     body.name = name
     body.pos = list(pos)
     body.quat = list(quat)
     add_mesh_geoms(spec, cache, body, mesh_path, scale)
+    for visual, path in visuals:
+        if visual.startswith(GLOW_VISUAL_PREFIX):
+            add_glow_geoms(spec, cache, body, glow_material(name, visual.removeprefix(GLOW_VISUAL_PREFIX)), mesh_parts(path), scale)
+        else:
+            add_part_geoms(spec, cache, body, mesh_parts(path), scale)
+        prepare_hulls([path])
+        add_hull_geoms(spec, cache, body, collision_hulls(path), scale)
     return body
 
 
 __all__ = [
     'COLLISION_GROUP',
+    'GLOW_VISUAL_PREFIX',
     'TILE_M',
     'MeshPart',
     'PartGroup',
     'add_box_body',
+    'add_glow_geoms',
     'add_hull_geoms',
     'add_mesh_body',
     'add_mesh_geoms',

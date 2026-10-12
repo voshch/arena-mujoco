@@ -5,3 +5,5 @@ Scale scale
 string mesh_path
 # look of a box, empty name and path => the plain default
 Material material
+# further visuals of a mesh prim, each also a collider
+PrimVisual[] visuals

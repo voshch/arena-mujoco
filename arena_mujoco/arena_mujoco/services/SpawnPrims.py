@@ -24,7 +24,8 @@ def _add_prim(env_id: int, prim: Prim) -> bool:
     mesh_path = prim.mesh_path.strip()
     try:
         if mesh_path:
-            store.add_body(env_id, lambda spec: add_mesh_body(spec, cache, prim.name, pos, quat, mesh_path, scale))
+            visuals = [(visual.name, visual.mesh_path) for visual in prim.visuals]
+            store.add_body(env_id, lambda spec: add_mesh_body(spec, cache, prim.name, pos, quat, mesh_path, scale, visuals))
         elif prim.material.name or prim.material.path:
             store.add_body(env_id, lambda spec: add_box_body(spec, prim.name, pos, quat, scale, ensure_material(spec, cache, prim.material)))
         else:
@@ -52,7 +53,7 @@ def _spawn_prims_cb(
     env_id = int(request.env_id)
     store.ensure_env(env_id)
 
-    prepare_hulls([path for prim in request.prims if (path := prim.mesh_path.strip())])
+    prepare_hulls([path for prim in request.prims for path in (prim.mesh_path.strip(), *(visual.mesh_path for visual in prim.visuals)) if path])
     results = [_add_prim(env_id, prim) for prim in request.prims]
     if any(prim.mesh_path.strip() for prim in request.prims):
         try:
