@@ -17,7 +17,7 @@ setup(
     maintainer='Vova Shcherbyna',
     maintainer_email='voshch@arena-rosnav.org',
     description='MuJoCo simulation backend for Arena-Rosnav',
-    license='TODO: License declaration',
+    license='MIT',
     entry_points={
         'console_scripts': [
             'run_mujoco = arena_mujoco.run_mujoco:main',

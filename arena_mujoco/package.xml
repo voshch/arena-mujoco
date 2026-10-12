@@ -5,7 +5,7 @@
   <version>0.0.0</version>
   <description>MuJoCo simulation backend for Arena-Rosnav</description>
   <maintainer email="voshch@arena-rosnav.org">Vova Shcherbyna</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <build_depend>ament_python</build_depend>
 

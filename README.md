@@ -2,6 +2,8 @@
 
 MuJoCo simulation backend for Arena-Rosnav. Selects with `sim:=mujoco`.
 
+This repository is the optional MuJoCo feature, a submodule of Arena. Install it with `arena feature mujoco install`, which checks it out, installs its system dependencies through rosdep and VirtualGL, syncs its Python dependencies into the venv and rebuilds. `arena feature mujoco uninstall` removes it again.
+
 Two packages live here:
 
 | Package | Role |
