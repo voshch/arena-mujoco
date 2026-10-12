@@ -49,6 +49,8 @@ BONE_MAP: dict[str, tuple[tuple[str, tuple[float, float, float], float], ...]] =
     'l_wrist': (('LeftHand', (0.1229, -0.2923, 0.9484), 1.0),),
     'r_r_wrist': (('RightHand', (0.1961, -0.9596, -0.2018), 1.0),),
     'r_wrist': (('RightHand', (0.1261, 0.2288, -0.9653), 1.0),),
+    'l_wheel': (('WheelL', (0.0, 1.0, 0.0), 1.0),),
+    'r_wheel': (('WheelR', (0.0, 1.0, 0.0), 1.0),),
 }
 
 __all__ = ['BONE_MAP']
