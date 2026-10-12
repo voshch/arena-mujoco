@@ -13,7 +13,8 @@ Vec = tuple[float, float, float]
 SLOTS = 7
 REFERENCE_LUX = 400.0
 REFLECTANCE = 0.4
-FILL_GAIN = 0.35
+FILL_GAIN = 2.0
+RIG_GAIN = 1.3
 DOME_GAIN = 0.6
 DEFAULT_AMBIENT: Vec = (0.5, 0.5, 0.5)
 DEFAULT_DIFFUSE: Vec = (0.4, 0.4, 0.4)
@@ -41,6 +42,7 @@ class Lamp:
     cutoff: float = 180.0
     directional: bool = False
     castshadow: bool = False
+    flat: bool = False
 
 
 DEFAULT_SUN = Lamp(position=(0.0, 0.0, 10.0), direction=_DOWN, diffuse=(0.7, 0.7, 0.7), specular=(0.3, 0.3, 0.3), directional=True)
@@ -48,7 +50,7 @@ DEFAULT_SUN = Lamp(position=(0.0, 0.0, 10.0), direction=_DOWN, diffuse=(0.7, 0.7
 
 @attrs.frozen
 class Headlight:
-    """Camera-bound light of a view, its ambient term the only unattenuated fill."""
+    """Camera-bound light of a view, its ambient term the share of the domes that lights every surface alike."""
 
     ambient: Vec = DEFAULT_AMBIENT
     diffuse: Vec = DEFAULT_DIFFUSE
@@ -89,6 +91,8 @@ class Light:
         gain = max(self.flux, 0.0) * max(self.level, 0.0) / REFERENCE_LUX
         if self.shape == 'dome':
             gain *= DOME_GAIN
+        elif self.rig:
+            gain *= RIG_GAIN
         return (self.color[0] * gain, self.color[1] * gain, self.color[2] * gain)
 
     def live(self) -> list[Vec]:
@@ -114,6 +118,14 @@ class Light:
         surface = 2.0 * (length * width + length * height + width * height)
         flux = max(self.flux, 0.0) * max(self.level, 0.0) * len(self.live())
         return _scaled(self.color, FILL_GAIN * REFLECTANCE * flux / (surface * (1.0 - REFLECTANCE)) / REFERENCE_LUX)
+
+    def bounce(self, eye: Vec) -> Lamp | None:
+        """The fill as an unattenuated lamp at half height over the rig's center, as the Gazebo backend places it, None outside its floor plan."""
+        fill = self.fill(eye)
+        if not any(fill):
+            return None
+        center = (sum(p[0] for p in self.positions) / len(self.positions), sum(p[1] for p in self.positions) / len(self.positions), self.positions[0][2] / 2.0)
+        return Lamp(position=center, direction=_DOWN, diffuse=fill, flat=True)
 
 
 def _unit(vector: Vec) -> Vec:
@@ -250,13 +262,14 @@ class Lighting:
         return any(not light.intrinsic for light in self._lights.values())
 
     def headlight(self, eye: Vec) -> Headlight:
-        """Default headlight, or once lights are declared only an ambient term: half of each dome plus the fill of the rigs whose floor plan the eye is over."""
+        """Default headlight, or once lights are declared only an ambient term: half of each dome."""
         if not self.declared:
             return Headlight()
         ambient = [0.0, 0.0, 0.0]
         for light in self._lights.values():
-            share = _scaled(light.output(), _DOME_AMBIENT_SHARE) if light.shape == 'dome' else light.fill(eye)
-            for channel, value in enumerate(share):
+            if light.shape != 'dome':
+                continue
+            for channel, value in enumerate(_scaled(light.output(), _DOME_AMBIENT_SHARE)):
                 ambient[channel] += value
         return Headlight(ambient=(ambient[0], ambient[1], ambient[2]), diffuse=_DARK, specular=_DARK)
 
@@ -283,8 +296,11 @@ class Lighting:
         return self._root
 
     def lamps(self, eye: Vec) -> list[Lamp]:
-        """The SLOTS lamps a camera at eye is shaded with: distant ones first, the rest merged the coarser the smaller they look."""
+        """The SLOTS lamps a camera at eye is shaded with: distant ones first, then the fill of the brightest rig the eye stands in, the rest merged the coarser the smaller they look."""
         lamps = self._distant()
+        bounce = max((lamp for light in self._lights.values() if (lamp := light.bounce(eye)) is not None), key=lambda lamp: sum(lamp.diffuse), default=None)
+        if bounce is not None and len(lamps) < SLOTS:
+            lamps.append(bounce)
         root = self._tree()
         if root is not None and len(lamps) < SLOTS:
             lamps.extend(node.lamp for node in _cut(root, eye, SLOTS - len(lamps)))
@@ -380,7 +396,7 @@ def _kind(lamp: Lamp) -> int:
 
 
 def _attenuation(lamp: Lamp) -> Vec:
-    return (1.0, 0.0, 0.0) if lamp.directional else (lamp.softening, 0.0, 1.0)
+    return (1.0, 0.0, 0.0) if lamp.directional or lamp.flat else (lamp.softening, 0.0, 1.0)
 
 
 _lightings: dict[int, Lighting] = {}
@@ -391,4 +407,4 @@ def lighting(env_id: int) -> Lighting:
     return _lightings.setdefault(env_id, Lighting())
 
 
-__all__ = ['DEFAULT_AMBIENT', 'DEFAULT_DIFFUSE', 'DEFAULT_SPECULAR', 'DEFAULT_SUN', 'DOME_GAIN', 'FILL_GAIN', 'GLOW_RESPONSE', 'GLOW_SEPARATOR', 'REFERENCE_LUX', 'REFLECTANCE', 'SLOTS', 'Headlight', 'Lamp', 'Light', 'Lighting', 'glow_material', 'lighting']
+__all__ = ['DEFAULT_AMBIENT', 'DEFAULT_DIFFUSE', 'DEFAULT_SPECULAR', 'DEFAULT_SUN', 'DOME_GAIN', 'FILL_GAIN', 'GLOW_RESPONSE', 'GLOW_SEPARATOR', 'REFERENCE_LUX', 'REFLECTANCE', 'RIG_GAIN', 'SLOTS', 'Headlight', 'Lamp', 'Light', 'Lighting', 'glow_material', 'lighting']

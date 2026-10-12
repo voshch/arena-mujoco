@@ -11,7 +11,7 @@ from arena_mujoco_msgs.srv import DeleteLights, SetLights, SpawnLights
 from geometry_msgs.msg import Point, Pose, Vector3
 
 from arena_mujoco import context
-from arena_mujoco.lights import DEFAULT_SUN, DOME_GAIN, FILL_GAIN, GLOW_RESPONSE, REFERENCE_LUX, REFLECTANCE, SLOTS, Headlight, Light, Lighting, glow_material, lighting
+from arena_mujoco.lights import DEFAULT_SUN, DOME_GAIN, FILL_GAIN, GLOW_RESPONSE, REFERENCE_LUX, REFLECTANCE, RIG_GAIN, SLOTS, Headlight, Light, Lighting, glow_material, lighting
 from arena_mujoco.mesh_mat import COLLISION_GROUP
 from arena_mujoco.scene import SceneStore
 from arena_mujoco.services.Lights import _delete_lights_cb, _set_lights_cb, _spawn_lights_cb
@@ -118,19 +118,42 @@ def test_panel_shines_only_into_the_half_space_it_faces():
     assert panel.ambient == (0.0, 0.0, 0.0)
 
 
-def test_rig_fills_its_room_with_the_light_its_surfaces_reflect():
+def test_rig_fills_its_room_from_its_center_with_the_light_its_surfaces_reflect():
     env = Lighting()
     env.spawn('hall', _rig(4, 3, rig=True))
     length, width, height = 3 * 2.4 + 2.4, 2 * 2.4 + 2.4, 2.6
     surface = 2.0 * (length * width + length * height + width * height)
     reflected = FILL_GAIN * REFLECTANCE * 12 * 3600.0 / (surface * (1.0 - REFLECTANCE)) / REFERENCE_LUX
-    assert env.headlight((3.6, 2.4, 1.0)).ambient == pytest.approx((reflected,) * 3)
-    assert env.headlight((3.6, 2.4, 40.0)).ambient == pytest.approx((reflected,) * 3)
-    assert env.headlight((30.0, 2.4, 1.0)).ambient == (0.0, 0.0, 0.0)
+
+    def bounces(eye: tuple[float, float, float]) -> list:
+        return [lamp for lamp in env.lamps(eye) if lamp.flat]
+
+    (bounce,) = bounces((3.6, 2.4, 1.0))
+    assert bounce.position == pytest.approx((3.6, 2.4, 1.3))
+    assert bounce.diffuse == pytest.approx((reflected,) * 3)
+    assert env.headlight((3.6, 2.4, 1.0)).ambient == (0.0, 0.0, 0.0)
+    assert bounces((3.6, 2.4, 40.0)) == [bounce]
+    assert bounces((30.0, 2.4, 1.0)) == []
+    direct = _total(env.lamps((3.6, 2.4, 1.0))) - bounce.diffuse[0]
+    assert direct == pytest.approx(12 * RIG_GAIN * 3600.0 * _PER_LUMEN / math.tau)
+    assert len(env.lamps((3.6, 2.4, 1.0))) == SLOTS
+
     env.set_output('hall', 0.5, [True] * 6 + [False] * 6)
-    assert env.headlight((3.6, 2.4, 1.0)).ambient == pytest.approx((reflected / 4.0,) * 3)
+    assert bounces((3.6, 2.4, 1.0))[0].diffuse == pytest.approx((reflected / 4.0,) * 3)
     env.spawn('lamp', _panel((3.6, 2.4, 2.6)))
-    assert env.headlight((3.6, 2.4, 1.0)).ambient == pytest.approx((reflected / 4.0,) * 3)
+    assert bounces((3.6, 2.4, 1.0))[0].diffuse == pytest.approx((reflected / 4.0,) * 3)
+
+
+def test_flat_bounce_is_unattenuated_in_the_scene():
+    store = SceneStore()
+    store.ensure_env(0)
+    model, data = store.get_model(0), store.get_data(0)
+    env = Lighting()
+    env.spawn('hall', _rig(2, 1, rig=True))
+    assert env.dress(model, data, (1.2, 0.0, 1.0))
+    flat = [index for index in range(model.nlight) if model.light_active[index] and tuple(model.light_attenuation[index]) == (1.0, 0.0, 0.0) and model.light_type[index] == int(mujoco.mjtLightType.mjLIGHT_SPOT)]
+    assert len(flat) == 1
+    assert tuple(model.light_pos[flat[0]]) == pytest.approx((1.2, 0.0, 1.3))
 
 
 def test_spot_keeps_its_cone_and_a_moved_one_turns_with_the_yaw():
