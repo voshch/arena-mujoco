@@ -10,12 +10,12 @@ from arena_mujoco_msgs.srv import SpawnWalls
 
 from arena_mujoco import context, hooks
 from arena_mujoco.mesh_mat import add_box_body, ensure_material
-from arena_mujoco.scene import RejectedBodies
+from arena_mujoco.scene import AssetCache, RejectedBodies
 
 from .utils import Service
 
 
-def _spawn_wall(env_id: int, wall: Wall, cache: dict) -> bool:
+def _spawn_wall(env_id: int, wall: Wall, cache: AssetCache) -> bool:
     store = context.get_scene_store()
 
     sx, sy, sz = wall.start.x, wall.start.y, wall.start.z

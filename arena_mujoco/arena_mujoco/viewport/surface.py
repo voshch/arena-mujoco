@@ -27,6 +27,7 @@ from .controller import Keyframe, Pose, ViewportController
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    import mujoco.viewer
     import rclpy.node
 
     from arena_mujoco.scene import SceneStore
@@ -51,7 +52,7 @@ def _pose(msg: geometry_msgs.msg.Pose) -> Pose:
 class Viewport:
     """Free camera over env_id, driven through the viewport contract and mirrored onto the passive viewer while one is open."""
 
-    def __init__(self, node: rclpy.node.Node, store: SceneStore, env_id: int, viewer: Callable[[], object | None]) -> None:
+    def __init__(self, node: rclpy.node.Node, store: SceneStore, env_id: int, viewer: Callable[[], mujoco.viewer.Handle | None]) -> None:
         self._node = node
         self._store = store
         self._env_id = env_id
@@ -71,7 +72,7 @@ class Viewport:
         node.create_service(ViewportSetView, f'{NAMESPACE}/set_view', self._cb_set_view)
         node.create_service(ViewportSetReferenceFrame, f'{NAMESPACE}/set_reference_frame', self._cb_set_reference_frame)
         node.create_service(ViewportSetProjection, f'{NAMESPACE}/set_projection', self._cb_set_projection)
-        node.create_service(ViewportCapture, f'{NAMESPACE}/capture', self._cb_capture, callback_group=MutuallyExclusiveCallbackGroup())
+        node.create_service(ViewportCapture, f'{NAMESPACE}/capture', self._cb_capture, callback_group=MutuallyExclusiveCallbackGroup())  # pyright: ignore[reportArgumentType]
         node.create_subscription(ViewportView, f'{NAMESPACE}/cmd_view', self._cb_cmd_view, STREAM_QOS)
         self._pose_pub = node.create_publisher(geometry_msgs.msg.PoseStamped, f'{NAMESPACE}/camera_pose', 10)
 

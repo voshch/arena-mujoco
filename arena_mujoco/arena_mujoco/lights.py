@@ -169,10 +169,12 @@ def _leaf(light: Light, position: Vec) -> _Node:
 def _merge(first: _Node, second: _Node) -> _Node:
     weight = first.weight + second.weight
     share = second.weight / weight
-    center = tuple(a + (b - a) * share for a, b in zip(first.center, second.center, strict=True))
+    cx, cy, cz = (a + (b - a) * share for a, b in zip(first.center, second.center, strict=True))
+    center = (cx, cy, cz)
     to_first, to_second = math.dist(center, first.center), math.dist(center, second.center)
     spread = (first.weight * (first.spread + to_first**2) + second.weight * (second.spread + to_second**2)) / weight
-    glow = tuple(a + b for a, b in zip(first.glow, second.glow, strict=True))
+    gr, gg, gb = (a + b for a, b in zip(first.glow, second.glow, strict=True))
+    glow = (gr, gg, gb)
     return _Node(
         center=center,
         radius=max(to_first + first.radius, to_second + second.radius),

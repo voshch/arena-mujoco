@@ -110,16 +110,24 @@ class _Robot:
     ) -> sensor_msgs.msg.JointState:
         msg = sensor_msgs.msg.JointState()
         msg.header.stamp = _make_stamp(sim_time)
+        names: list[str] = []
+        positions: list[float] = []
+        velocities: list[float] = []
+        efforts: list[float] = []
         for joint in self.joint_names:
             jnt_id = self._joint_ids.get(joint)
             if jnt_id is None:
                 continue
             qadr = int(model.jnt_qposadr[jnt_id])
             vadr = int(model.jnt_dofadr[jnt_id])
-            msg.name.append(joint)
-            msg.position.append(float(data.qpos[qadr]))
-            msg.velocity.append(float(data.qvel[vadr]))
-            msg.effort.append(float(data.qfrc_actuator[vadr]))
+            names.append(joint)
+            positions.append(float(data.qpos[qadr]))
+            velocities.append(float(data.qvel[vadr]))
+            efforts.append(float(data.qfrc_actuator[vadr]))
+        msg.name = names
+        msg.position = positions
+        msg.velocity = velocities
+        msg.effort = efforts
         return msg
 
 
@@ -245,9 +253,12 @@ def _despawn(env_id: int, robot_entry: RobotEntry) -> None:
     for key, robot in list(_robots.items()):
         if robot.env_id != env_id or robot.prim_name != robot_entry.prim_name:
             continue
-        node.destroy_publisher(robot.pub)
-        node.destroy_subscription(robot.sub_vel)
-        node.destroy_subscription(robot.sub_pos)
+        if robot.pub is not None:
+            node.destroy_publisher(robot.pub)
+        if robot.sub_vel is not None:
+            node.destroy_subscription(robot.sub_vel)
+        if robot.sub_pos is not None:
+            node.destroy_subscription(robot.sub_pos)
         del _robots[key]
 
 

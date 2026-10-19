@@ -63,9 +63,15 @@ def clip_frames(clip_path: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
             continue
         sampler = by_id[channel.get('source', '').lstrip('#')]
         arrays = {entry.get('semantic'): by_id[entry.get('source', '').lstrip('#')].find(f'{namespace}float_array') for entry in sampler.findall(f'{namespace}input')}
-        frames[joint] = np.array(arrays['OUTPUT'].text.split(), dtype=np.float64).reshape(-1, 4, 4)
+        output = arrays['OUTPUT']
+        if output is None or output.text is None:
+            raise ValueError(f'{clip_path}: channel {joint} has no OUTPUT float_array')
+        frames[joint] = np.array(output.text.split(), dtype=np.float64).reshape(-1, 4, 4)
         if not len(times):
-            times = np.array(arrays['INPUT'].text.split(), dtype=np.float64)
+            keyed = arrays['INPUT']
+            if keyed is None or keyed.text is None:
+                raise ValueError(f'{clip_path}: channel {joint} has no INPUT float_array')
+            times = np.array(keyed.text.split(), dtype=np.float64)
     keys = min([len(times), *(len(matrices) for matrices in frames.values())])
     return times[:keys], {joint: matrices[:keys] for joint, matrices in frames.items()}
 
@@ -155,6 +161,8 @@ def _skeleton(dae: collada.Collada) -> list[_Node]:
         for child in node.children:
             descend(child, index, below_root or joint)
 
+    if dae.scene is None:
+        raise ValueError(f'{dae.filename} has no scene')
     for node in dae.scene.nodes:
         descend(node, -1, False)
     return nodes
@@ -235,12 +243,15 @@ def _diffuse(material: collada.material.Material, mesh_dir: Path) -> tuple[tuple
         return (1.0, 1.0, 1.0, 1.0), image
     if diffuse is None:
         return None, None
-    return tuple(float(channel) for channel in diffuse), None
+    red, green, blue, alpha = (float(channel) for channel in diffuse)
+    return (red, green, blue, alpha), None
 
 
 def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
     """Write the actor's skin parts, bone influences and clip poses as rig.npz into out_dir, textures beside it."""
     import collada
+    import collada.common
+    import collada.triangleset
 
     dae = collada.Collada(str(actor.skin), ignore=[collada.common.DaeUnsupportedError, collada.common.DaeBrokenRefError])
     (skin,) = dae.controllers
@@ -308,6 +319,7 @@ def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
         arrays[f'{prefix}influence_weight'] = influence_weight[influences]
         arrays[f'{prefix}texture'] = np.array('')
         if textured:
+            assert image is not None
             uv = triangles.texcoordset[0][unique[:, 1]]
             arrays[f'{prefix}uv'] = np.stack([uv[:, 0], 1.0 - uv[:, 1]], axis=1)
             arrays[f'{prefix}texture'] = np.array(f'{stem}_{parts}.png')
@@ -316,7 +328,7 @@ def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
             small.save(out_dir / f'{stem}_{parts}.png')
         parts += 1
     arrays['parts'] = np.array(parts)
-    np.savez(out_dir / _RIG_FILE, **arrays)
+    np.savez(out_dir / _RIG_FILE, **arrays)  # pyright: ignore[reportArgumentType]
 
 
 def _read_rig(out_dir: Path, z_offset: float) -> Rig:

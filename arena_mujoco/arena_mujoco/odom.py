@@ -15,6 +15,7 @@ from arena_mujoco.context import get_scene_store
 
 if TYPE_CHECKING:
     import mujoco
+    import rclpy.publisher
 
     from arena_mujoco.services.SpawnUrdf import RobotEntry
 
@@ -27,7 +28,7 @@ class _RobotOdom:
     base_frame: str
     odom_frame_id: str
     localization: bool
-    odom_pub: object | None
+    odom_pub: rclpy.publisher.Publisher | None
     last_pub_time: float = field(default=-1.0)
 
 
@@ -170,6 +171,7 @@ def _pump() -> None:
         entry.odom_pub.publish(odom)
 
     if transforms:
+        assert _broadcaster is not None
         _broadcaster.sendTransform(transforms)
 
 

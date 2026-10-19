@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     import trimesh
+    import trimesh.visual
     from arena_mujoco_msgs.msg import Material as MaterialMsg
 
     from arena_mujoco.scene import AssetCache
@@ -165,22 +166,26 @@ def _converted_parts(source: Path) -> tuple[MeshPart, ...]:
     return cached_parts([source], lambda: _trimesh_groups(source))
 
 
-def _albedo(visual: trimesh.visual.base.Visuals) -> tuple[tuple[float, float, float, float] | None, Image.Image | None]:
+def _albedo(visual: trimesh.visual.ColorVisuals | trimesh.visual.TextureVisuals) -> tuple[tuple[float, float, float, float] | None, Image.Image | None]:
     """Diffuse color (None when the file sets none) and, with texture coordinates present, the diffuse image."""
-    import trimesh
+    import trimesh.visual.material
 
     if not isinstance(visual, trimesh.visual.TextureVisuals):
-        return (tuple(float(c) / 255.0 for c in visual.main_color) if visual.defined else None), None
+        if not visual.defined:
+            return None, None
+        red, green, blue, alpha = (float(c) / 255.0 for c in visual.main_color)
+        return (red, green, blue, alpha), None
     material = visual.material
     if isinstance(material, trimesh.visual.material.PBRMaterial):
         material = material.to_simple()
-    rgba = tuple(float(c) / 255.0 for c in material.diffuse)
-    return rgba, material.image if visual.uv is not None else None
+    red, green, blue, alpha = (float(c) / 255.0 for c in material.diffuse)
+    return (red, green, blue, alpha), material.image if visual.uv is not None else None
 
 
 def _trimesh_groups(source: Path) -> list[PartGroup]:
     """Geometry of source merged per material, each sub-mesh a convex hull when the file exceeds the face budget."""
     import trimesh
+    import trimesh.visual
 
     loaded = trimesh.load(str(source))
     meshes = loaded.dump(concatenate=False) if isinstance(loaded, trimesh.Scene) else [loaded]
@@ -189,13 +194,14 @@ def _trimesh_groups(source: Path) -> list[PartGroup]:
 
     merged: dict[object, dict] = {}
     for mesh in meshes:
+        assert mesh.visual is not None
         rgba, image = _albedo(mesh.visual)
         uv = None
         if oversized:
             step = max(1, len(mesh.vertices) // _HULL_POINTS)
             mesh = trimesh.convex.convex_hull(mesh.vertices[::step])
             image = None
-        elif image is not None:
+        elif image is not None and isinstance(mesh.visual, trimesh.visual.TextureVisuals):
             uv = np.asarray(mesh.visual.uv)
         key = ('texture', id(image)) if image is not None else ('rgba', rgba if rgba is None else tuple(round(c, 3) for c in rgba))
         entry = merged.setdefault(key, {'rgba': rgba, 'image': image, 'vertices': [], 'faces': [], 'uv': [], 'count': 0})
@@ -226,6 +232,8 @@ def _write_hulls(out_dir: Path, stem: str, source: Path) -> None:
 
     loaded = trimesh.load(str(source))
     mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise ValueError(f'{source} holds no triangle mesh')
     coacd.set_log_level('error')
     pieces = coacd.run_coacd(
         coacd.Mesh(np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int32)),

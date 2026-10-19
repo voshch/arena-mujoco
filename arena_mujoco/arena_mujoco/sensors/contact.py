@@ -51,8 +51,8 @@ def contacts_message(model: mujoco.MjModel, data: mujoco.MjData, body_id: int, h
             contact = pairs[(own, other)] = Contact(collision1=_entity(model, own), collision2=_entity(model, other))
         x, y, z = data.contact.pos[index].tolist()
         normal = data.contact.frame[index, :3] * (-1.0 if data.contact.geom[index, 0] == own else 1.0)
-        contact.positions.append(Vector3(x=x, y=y, z=z))
-        contact.normals.append(Vector3(x=float(normal[0]), y=float(normal[1]), z=float(normal[2])))
+        contact.positions.append(Vector3(x=x, y=y, z=z))  # pyright: ignore[reportAttributeAccessIssue]
+        contact.normals.append(Vector3(x=float(normal[0]), y=float(normal[1]), z=float(normal[2])))  # pyright: ignore[reportAttributeAccessIssue]
         contact.depths.append(float(-data.contact.dist[index]))
     return Contacts(header=header, contacts=list(pairs.values()))
 

@@ -252,7 +252,7 @@ def _mujoco_compat(urdf_path: str) -> tuple[str, dict[str, tuple[str, ...]], dic
         for shape in [*link.findall('visual'), *link.findall('collision')]:
             mesh = shape.find('geometry/mesh')
             filename = '' if mesh is None else mesh.attrib.get('filename', '').removeprefix('file://')
-            if not filename:
+            if mesh is None or not filename:
                 continue
             try:
                 parts = mesh_parts(filename)

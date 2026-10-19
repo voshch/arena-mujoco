@@ -175,6 +175,7 @@ class SceneStore:
         scene = _EnvScene(env_id)
         self._envs[env_id] = scene
         self.recompile(env_id)
+        assert scene.data is not None
         scene.data.time = self.time
 
     def add_body(self, env_id: int, body_builder: Callable[[mujoco.MjSpec], mujoco.MjsBody]) -> str:
@@ -338,9 +339,9 @@ class SceneStore:
         body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, sanitize_id(name))
         if body_id < 0:
             return None
-        pos = tuple(float(v) for v in data.xpos[body_id])
-        quat = tuple(float(v) for v in data.xquat[body_id])
-        return pos, quat
+        px, py, pz = (float(v) for v in data.xpos[body_id])
+        qw, qx, qy, qz = (float(v) for v in data.xquat[body_id])
+        return (px, py, pz), (qw, qx, qy, qz)
 
     def get_clock_time(self, env_id: int) -> float:
         """Store clock, shared by every env, stamps /clock and sensors."""
@@ -454,6 +455,8 @@ class SceneStore:
             if min(bodies) < 0:
                 return
             ids = scene.bone_ids[handle] = model.body_mocapid[bodies]
+        if data is None:
+            return
         data.mocap_pos[ids] = pos
         data.mocap_quat[ids] = quat
 

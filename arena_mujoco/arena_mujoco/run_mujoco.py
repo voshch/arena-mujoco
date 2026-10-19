@@ -150,7 +150,7 @@ class MujocoController(rclpy.node.Node):
         return response
 
     def _cb_peds(self, msg: Pedestrians) -> None:
-        update_pedestrians(msg.pedestrians)
+        update_pedestrians(list(msg.pedestrians))
 
     def _cb_reset_world(
         self,
@@ -228,6 +228,7 @@ class MujocoController(rclpy.node.Node):
             return
         if self._viewer is None:
             frame = (model, mujoco.MjData(model))
+            assert _mj_viewer is not None
             try:
                 self._viewer = _mj_viewer.launch_passive(*frame)
             except Exception as exc:  # noqa: BLE001 - no display, fall back to headless
@@ -250,6 +251,7 @@ class MujocoController(rclpy.node.Node):
             return
         if lighting(_VIEWER_ENV).dress(model, data, self._viewport.eye):
             self._scene_store.note_model_edit(_VIEWER_ENV)
+        assert self._viewer_frame is not None
         shown = self._viewer_frame[1] if self._viewer_frame[0] is model else mujoco.MjData(model)
         mujoco.mj_copyData(shown, model, data)
         self._viewer_frame = (model, shown, self._scene_store.model_edits(_VIEWER_ENV))
@@ -261,11 +263,11 @@ class MujocoController(rclpy.node.Node):
         while True:
             self._viewer_wake.wait()
             self._viewer_wake.clear()
-            viewer = self._viewer
-            if viewer is None:
+            viewer, frame, loaded = self._viewer, self._viewer_frame, self._viewer_loaded
+            if viewer is None or frame is None or loaded is None:
                 return
-            model, shown, edits = self._viewer_frame
-            if self._viewer_loaded[0] is not model:
+            model, shown, edits = frame
+            if loaded[0] is not model:
                 sim = viewer._get_sim()  # noqa: SLF001 - the only entry to swap a passive viewer's model
                 if sim is None:
                     return
@@ -277,7 +279,7 @@ class MujocoController(rclpy.node.Node):
             self._viewer_edits = edits
             self._viewer_idle.set()
 
-    def _frame_world(self, viewer: object, model: mujoco.MjModel, shown: mujoco.MjData) -> None:
+    def _frame_world(self, viewer: "mujoco.viewer.Handle", model: mujoco.MjModel, shown: mujoco.MjData) -> None:
         """Point the free camera at everything standing in the env, unless the user moved it since the last framing."""
         camera = viewer.cam
         if self._viewer_view is not None and (tuple(camera.lookat), camera.distance) != self._viewer_view:
