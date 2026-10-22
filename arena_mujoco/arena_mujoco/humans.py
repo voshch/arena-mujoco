@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 _TEXTURE_PX = 512
 _MIN_OPAQUE = 0.25
 _RIG_FILE = 'rig.npz'
+_BIND_STANCE = frozenset(f'{side}{bone}' for side in ('Left', 'Right') for bone in ('UpLeg', 'Leg', 'Foot', 'ToeBase'))
+_WHEELS = frozenset(('WheelL', 'WheelR'))
+_SOLE_BAND = 0.01  # m above a foot's lowest bind vertex that still counts as sole
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,8 @@ class Rig:
     inverse_binds: np.ndarray
     bind_positions: np.ndarray
     scale: float
+    sole_bones: np.ndarray
+    sole_points: np.ndarray
 
     @property
     def layout(self) -> tuple[tuple[str, ...], tuple[int, ...], tuple[int, ...]]:
@@ -277,7 +282,7 @@ def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
     _, stance = clips.get('idle') or next(iter(clips.values()))
     roots = {node.joint for node in skeleton if node.root}
     arrays['node_parents'] = np.array(parents)
-    neutral = _locals(skeleton, {joint: matrices[:1] for joint, matrices in stance.items() if joint not in roots}, 1)[0][:, 0]
+    neutral = _locals(skeleton, {joint: matrices[:1] for joint, matrices in stance.items() if joint not in roots | _BIND_STANCE}, 1)[0][:, 0]
     jointed = [index for index, node in enumerate(skeleton) if node.joint is not None]
     neutral[jointed, :3, :3] = _orthonormal(neutral[jointed, :3, :3])
     arrays['neutral'] = neutral
@@ -331,6 +336,42 @@ def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
     np.savez(out_dir / _RIG_FILE, **arrays)  # pyright: ignore[reportArgumentType]
 
 
+def _soles(bones: tuple[str, ...], parts: Sequence[SkinPart], bind_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Bones and bind-space points of each foot's heel and toe sole vertex, none for a rig on wheels."""
+    if _WHEELS & set(bones):
+        return np.zeros(0, dtype=int), np.zeros((0, 3))
+    owner_lists: list[np.ndarray] = []
+    for part in parts:
+        weight = np.zeros(len(part.vertices))
+        owner = np.full(len(part.vertices), -1)
+        for bone, (vertices, weights) in enumerate(zip(part.bone_vertices, part.bone_weights, strict=True)):
+            heavier = weights > weight[vertices]
+            weight[vertices[heavier]] = weights[heavier]
+            owner[vertices[heavier]] = bone
+        owner_lists.append(owner)
+    cloud = np.concatenate([part.vertices for part in parts]) if parts else np.zeros((0, 3))
+    owners = np.concatenate(owner_lists) if parts else np.zeros(0, dtype=int)
+    sole_bones: list[int] = []
+    sole_points: list[np.ndarray] = []
+    for side in ('Left', 'Right'):
+        if f'{side}Foot' not in bones or f'{side}ToeBase' not in bones:
+            continue
+        foot, toe = bones.index(f'{side}Foot'), bones.index(f'{side}ToeBase')
+        on_foot = np.flatnonzero((owners == foot) | (owners == toe))
+        if not len(on_foot):
+            continue
+        forward = bind_positions[toe] - bind_positions[foot]
+        forward[2] = 0.0
+        sole = on_foot[cloud[on_foot, 2] <= cloud[on_foot, 2].min() + _SOLE_BAND]
+        along = cloud[sole] @ forward
+        middle = 0.5 * (along.min() + along.max())
+        for half in (sole[along <= middle], sole[along > middle]):
+            vertex = half[int(np.argmin(cloud[half, 2]))]
+            sole_bones.append(int(owners[vertex]))
+            sole_points.append(cloud[vertex])
+    return np.array(sole_bones, dtype=int), np.array(sole_points).reshape(-1, 3)
+
+
 def _read_rig(out_dir: Path, z_offset: float) -> Rig:
     with np.load(out_dir / _RIG_FILE) as arrays:
         bones = tuple(str(name) for name in arrays['bones'])
@@ -363,6 +404,7 @@ def _read_rig(out_dir: Path, z_offset: float) -> Rig:
             )
             for name in arrays['clips']
         }
+        sole_bones, sole_points = _soles(bones, parts, arrays['bind_positions'])
         return Rig(
             bones=bones,
             parts=tuple(parts),
@@ -374,6 +416,8 @@ def _read_rig(out_dir: Path, z_offset: float) -> Rig:
             inverse_binds=arrays['inverse_binds'],
             bind_positions=arrays['bind_positions'],
             scale=float(arrays['scale']),
+            sole_bones=sole_bones,
+            sole_points=sole_points,
         )
 
 
@@ -386,7 +430,7 @@ def actor_rig(sdf_path: str) -> Rig:
     if rig is None:
         actor = read_actor(sdf_path)
         sources = [actor.skin, *(actor.clips[name] for name in sorted(actor.clips))]
-        out_dir = cache_entry(sources, f'bones at joints:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
+        out_dir = cache_entry(sources, f'bones at joints, legs at bind:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
         rig = _rigs[sdf_path] = _read_rig(out_dir, actor.z_offset)
     return rig
 
@@ -437,7 +481,7 @@ def _quaternions(rotations: np.ndarray) -> np.ndarray:
 
 
 def joint_poses(rigs: Sequence[Rig], roots: np.ndarray, angles: Sequence[Mapping[str, float]]) -> tuple[np.ndarray, np.ndarray]:
-    """World bone positions (rigs, bones, 3) and wxyz quaternions for rigs of one skeleton layout standing at roots (rigs, 4, 4), each bone turned from its neutral stance by its wire joint angles."""
+    """World bone positions (rigs, bones, 3) and wxyz quaternions for rigs of one skeleton layout standing at roots (rigs, 4, 4), each bone turned from its neutral stance by its wire joint angles, a rig with soles lowered or raised until its lowest sole point is at its root's height."""
     joints, turned, axes, gains = _turns(rigs[0].bones)
     values = np.array([[pose.get(joint, 0.0) for joint in joints] for pose in angles]).reshape(len(rigs), len(joints)) * gains
     turns = _axis_rotations(axes, values)
@@ -449,7 +493,14 @@ def joint_poses(rigs: Sequence[Rig], roots: np.ndarray, angles: Sequence[Mapping
     joints = np.moveaxis(worlds[nodes], 0, 1)
     skinned = joints @ np.stack([rig.inverse_binds for rig in rigs])
     scales = np.array([rig.scale for rig in rigs]).reshape(-1, 1, 1, 1)
-    return joints[..., :3, 3], _quaternions(skinned[..., :3, :3] / scales)
+    rotations = skinned[..., :3, :3] / scales
+    positions = joints[..., :3, 3].copy()
+    for index, rig in enumerate(rigs):
+        if len(rig.sole_bones):
+            bones = rig.sole_bones
+            heights = np.einsum('kj,kj->k', rotations[index, bones, 2], rig.sole_points - rig.bind_positions[bones]) + positions[index, bones, 2]
+            positions[index, :, 2] += roots[index, 2, 3] - heights.min()
+    return positions, _quaternions(rotations)
 
 
 def add_skin(spec: mujoco.MjSpec, cache: AssetCache, name: str, rig: Rig, part: SkinPart, bones: Sequence[str]) -> mujoco.MjsSkin:

@@ -1,3 +1,4 @@
+import dataclasses
 import importlib.util
 import sys
 from pathlib import Path
@@ -10,7 +11,7 @@ from arena_people_msgs.srv import SpawnPedestrians
 
 from arena_mujoco import context
 from arena_mujoco.bone_map import BONE_MAP
-from arena_mujoco.humans import Rig, _quaternions, actor_rig, clip_frames, joint_poses, read_actor
+from arena_mujoco.humans import Rig, SkinPart, _quaternions, _soles, actor_rig, clip_frames, joint_poses, read_actor
 from arena_mujoco.scene import SceneStore
 from arena_mujoco.sensors.laser import cast_rays
 from arena_mujoco.services.SpawnPedestrians import reset_env, spawn_pedestrians_service, update_pedestrians
@@ -122,28 +123,80 @@ def test_rig_poses_the_skin_by_its_clips_with_the_root_advance_removed(actor_sdf
 
 
 def _knee_turned(angle: float) -> set[tuple[float, ...]]:
-    """The fixture's vertices with the LeftLeg bone turned by the wire's l_knee angle from its idle stance."""
+    """The fixture's vertices with the LeftLeg bone turned by the wire's l_knee angle from its bind rest."""
     ((_, axis, gain),) = BONE_MAP['l_knee']
     quaternion = np.empty(4)
     mujoco.mju_axisAngle2Quat(quaternion, np.array(axis) / np.linalg.norm(axis), gain * angle)
     turn = np.empty(9)
     mujoco.mju_quat2Mat(turn, quaternion)
-    rotation = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]) @ turn.reshape(3, 3)
+    rotation = turn.reshape(3, 3)
     shin = np.array([[0.0, 0.0, 1.0], [0.1, 0.0, 0.0]]) @ rotation.T + (0.0, 0.0, 1.0)
     return {(0.0, 0.0, 0.0), (0.0, 0.0, 1.0), *(tuple(vertex) for vertex in (shin + 0.0).round(4).tolist())}
 
 
-def test_wire_joint_angles_turn_bones_from_the_idle_stance(actor_sdf: str):
+def test_wire_joint_angles_turn_leg_bones_from_their_bind_rest(actor_sdf: str):
     rig = actor_rig(actor_sdf)
     standing = np.eye(4)[None]
 
     positions, quaternions = joint_poses([rig], standing, [{}])
-    assert _skinned(rig, positions[0], quaternions[0]) == _KNEE_UP == _knee_turned(0.0)
+    assert _skinned(rig, positions[0], quaternions[0]) == _STANDING == _knee_turned(0.0)
 
     positions, quaternions = joint_poses([rig, rig], np.concatenate([standing, standing]), [{'l_knee': -0.8, 'unknown': 1.0}, {'l_knee': 0.5}])
     assert _skinned(rig, positions[0], quaternions[0]) == _knee_turned(-0.8)
     assert _skinned(rig, positions[1], quaternions[1]) == _knee_turned(0.5)
-    assert _knee_turned(-0.8) != _KNEE_UP
+    assert _knee_turned(-0.8) != _STANDING
+
+
+_FEET = ('Hips', 'LeftFoot', 'LeftToeBase', 'RightFoot', 'RightToeBase')
+_FEET_BINDS = np.array([[0.0, 0.0, 0.9], [0.0, 0.1, 0.1], [0.15, 0.1, 0.03], [0.0, -0.1, 0.1], [0.15, -0.1, 0.03]])
+_SHOE = (
+    ((-0.05, 0.1, 0.004), 1),
+    ((-0.04, 0.1, 0.0), 1),
+    ((0.0, 0.1, 0.02), 1),
+    ((0.18, 0.1, 0.002), 2),
+    ((0.20, 0.1, 0.006), 2),
+    ((0.0, 0.0, 0.9), 0),
+    ((-0.04, -0.1, 0.0), 3),
+    ((0.19, -0.1, 0.001), 4),
+)
+
+
+def _shoe_part() -> SkinPart:
+    owners = np.array([bone for _, bone in _SHOE])
+    return SkinPart(
+        vertices=np.array([point for point, _ in _SHOE]),
+        faces=np.zeros((0, 3), dtype=int),
+        uv=None,
+        rgba=None,
+        texture=None,
+        bone_vertices=tuple(np.flatnonzero(owners == bone) for bone in range(len(_FEET))),
+        bone_weights=tuple(np.ones(int((owners == bone).sum())) for bone in range(len(_FEET))),
+    )
+
+
+def test_soles_take_the_lowest_rear_and_front_sole_vertex_of_each_foot():
+    bones, points = _soles(_FEET, [_shoe_part()], _FEET_BINDS)
+    assert bones.tolist() == [1, 2, 3, 4]
+    assert points.tolist() == [[-0.04, 0.1, 0.0], [0.18, 0.1, 0.002], [-0.04, -0.1, 0.0], [0.19, -0.1, 0.001]]
+
+
+def test_a_rig_on_wheels_has_no_soles():
+    bones, points = _soles((*_FEET, 'WheelL'), [_shoe_part()], np.vstack([_FEET_BINDS, np.zeros(3)]))
+    assert len(bones) == 0 and points.shape == (0, 3)
+
+
+def test_joint_poses_stand_the_lowest_sole_point_at_the_root_height(actor_sdf: str):
+    rig = dataclasses.replace(actor_rig(actor_sdf), sole_bones=np.array([1]), sole_points=np.array([[0.1, 0.0, 1.0]]))
+    root = np.eye(4)[None]
+    root[0, 2, 3] = 0.25
+    for angles in ({}, {'l_knee': -0.8}):
+        positions, quaternions = joint_poses([rig], root, [angles])
+        rotation = np.empty(9)
+        mujoco.mju_quat2Mat(rotation, quaternions[0, 1])
+        sole = rotation.reshape(3, 3) @ (rig.sole_points[0] - rig.bind_positions[1]) + positions[0, 1]
+        assert sole[2] == pytest.approx(0.25)
+        unplanted, _ = joint_poses([actor_rig(actor_sdf)], root, [angles])
+        assert positions[0, :, :2] == pytest.approx(unplanted[0, :, :2])
 
 
 def test_quaternions_match_mujoco_for_any_rotation():
@@ -189,7 +242,7 @@ def test_wire_pose_matches_isaacs_converter_and_provider(actor_sdf: str, isaac_p
     document = convert._Collada(str(actor.skin))
     joints = convert._parse_skeleton(document)
     (skinned,) = convert._parse_skinned_meshes(document)
-    rotations, translations = convert._neutral_pose(joints, convert._parse_animations(convert._Collada(str(actor.clips['idle']))))
+    rotations, translations = convert._neutral_pose(joints, convert._parse_animations(convert._Collada(str(actor.clips['idle']))), convert._BIND_STANCE)
     provider = external.ExternalPoseProvider(tuple(joint.path for joint in joints), np.array(rotations), np.array(translations))
     angles = {'l_knee': -0.7}
     provider.push(0.0, list(angles), list(angles.values()))
@@ -301,7 +354,7 @@ def test_pedestrian_with_joint_state_on_the_wire_follows_it_instead_of_a_clip(st
     turned.joint_state.name = ['l_knee']
     turned.joint_state.position = [0.0]
     update_pedestrians([turned])
-    assert _skin_vertices(store, 7) == {(round(4.0 - y, 4), round(x, 4), round(z - 0.04, 4)) for x, y, z in _KNEE_UP}
+    assert _skin_vertices(store, 7) == {(round(4.0 - y, 4), round(x, 4), round(z - 0.04, 4)) for x, y, z in _STANDING}
 
 
 def test_deleting_a_pedestrian_body_takes_its_bones_and_skins_along(store: SceneStore, actor_sdf: str):

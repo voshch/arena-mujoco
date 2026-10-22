@@ -142,7 +142,7 @@ def _drive_joints(pedestrians: Sequence[Pedestrian]) -> None:
         mujoco.mju_quat2Mat(rotation, quat)
         root = np.eye(4)
         root[:3, :3] = rotation.reshape(3, 3)
-        root[:3, 3] = position + (0.0, 0.0, rig.z_offset)
+        root[:3, 3] = position + (0.0, 0.0, 0.0 if len(rig.sole_bones) else rig.z_offset)
         angles = dict(zip(pedestrian.joint_state.name, pedestrian.joint_state.position, strict=False))
         batches.setdefault(rig.layout, []).append((entry, rig, root, angles))
     for batch in batches.values():
