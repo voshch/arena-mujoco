@@ -158,6 +158,14 @@ def _prm(*vals: float) -> list[float]:
     return [*vals, *([0.0] * (10 - len(vals)))]
 
 
+def _limit_force(act: mujoco.MjsActuator, joint: mujoco.MjsJoint) -> None:
+    """Clamp the actuator to its joint's force range."""
+    low, high = joint.actfrcrange
+    if high > low:
+        act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+        act.forcerange = [low, high]
+
+
 def _add_position_actuator(spec: mujoco.MjSpec, target_joint: str, name: str) -> None:
     """Add a position-servo actuator (kp position feedback, kv damping) targeting target_joint."""
     act = spec.add_actuator()
@@ -168,6 +176,7 @@ def _add_position_actuator(spec: mujoco.MjSpec, target_joint: str, name: str) ->
     act.gainprm = _prm(_POSITION_KP)
     act.biastype = mujoco.mjtBias.mjBIAS_AFFINE
     act.biasprm = _prm(0.0, -_POSITION_KP, -_POSITION_KV)
+    _limit_force(act, spec.joint(target_joint))
 
 
 def _add_velocity_actuator(spec: mujoco.MjSpec, target_joint: str, name: str) -> None:
@@ -180,6 +189,7 @@ def _add_velocity_actuator(spec: mujoco.MjSpec, target_joint: str, name: str) ->
     act.gainprm = _prm(_VELOCITY_KV)
     act.biastype = mujoco.mjtBias.mjBIAS_AFFINE
     act.biasprm = _prm(0.0, 0.0, -_VELOCITY_KV)
+    _limit_force(act, spec.joint(target_joint))
 
 
 def _pre_compile(

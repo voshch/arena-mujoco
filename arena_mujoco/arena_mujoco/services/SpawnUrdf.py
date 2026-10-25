@@ -32,6 +32,7 @@ _logger = logging.getLogger(__name__)
 _RGBA_UNSET = (0.5, 0.5, 0.5, 1.0)
 
 _JOINT_ARMATURE = 0.2
+_MIN_JOINT_ACCELERATION = 50.0
 
 
 _CAMERA_KINDS = frozenset({'camera', 'depth', 'depth_camera', 'rgbd_camera'})
@@ -297,6 +298,14 @@ def _exclude_self_contacts(robot_spec: mujoco.MjSpec) -> None:
                 robot_spec.add_exclude(bodyname1=first, bodyname2=second)
 
 
+def _armature_floor(joint: mujoco.MjsJoint) -> float:
+    """Armature every joint gets, capped so a force-limited motor still accelerates the joint at _MIN_JOINT_ACCELERATION."""
+    low, high = joint.actfrcrange
+    if high <= low:
+        return _JOINT_ARMATURE
+    return min(_JOINT_ARMATURE, max(abs(low), abs(high)) / _MIN_JOINT_ACCELERATION)
+
+
 def _pose_to_mujoco(
     pose: Pose,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
@@ -347,7 +356,7 @@ def _spawn_urdf_cb(
     _apply_mesh_parts(robot_spec)
 
     for joint in robot_spec.joints:
-        joint.armature = max(joint.armature, _JOINT_ARMATURE)
+        joint.armature = max(joint.armature, _armature_floor(joint))
 
     joint_names = tuple(joint.name for joint in robot_spec.joints if joint.name)
     add_rollers(robot_spec, roller_wheels(ET.parse(request.urdf_path).getroot()))

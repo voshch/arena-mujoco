@@ -16,6 +16,7 @@ _ROLLERS = 12
 _SPHERES = 2
 _CENTER_RADIUS_SHARE = 0.28
 _MASS_SHARE = 0.25
+_SLIP_RATIO = 0.1
 
 _logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ def _coefficient(gazebo: ET.Element, *tags: str) -> float | None:
 
 
 def roller_wheels(root: ET.Element) -> list[RollerWheel]:
-    """Links whose <gazebo> friction grips along fdir1 and slides freely across it, or the reverse."""
+    """Links whose <gazebo> friction grips along fdir1 and slides across it at a tenth or less, or the reverse."""
     rotations = _link_rotations(root)
     wheels: list[RollerWheel] = []
     for gazebo in root.findall('gazebo'):
@@ -109,15 +110,15 @@ def roller_wheels(root: ET.Element) -> list[RollerWheel]:
         along = _vector(direction)
         mu = _coefficient(gazebo, 'mu', 'mu1')
         mu2 = _coefficient(gazebo, 'mu2')
-        if along is None or mu is None or mu2 is None or (mu > 0.0) == (mu2 > 0.0):
+        if along is None or mu is None or mu2 is None or max(mu, mu2) <= 0.0 or min(mu, mu2) > _SLIP_RATIO * max(mu, mu2):
             continue
         frame = direction.attrib.get(_GZ_EXPRESSED_IN, link)
         if frame not in rotations:
             continue
         to_link = rotations[link].T @ rotations[frame]
-        down = to_link @ np.array([0.0, 0.0, -1.0])
+        down = rotations[link].T @ np.array([0.0, 0.0, -1.0])
         grip = to_link @ along
-        if mu2 > 0.0:
+        if mu2 > mu:
             grip = np.cross(down, grip)
         wheels.append(
             RollerWheel(

@@ -108,6 +108,25 @@ def test_wheels_gripping_equally_both_ways_cannot_strafe(store: SceneStore, tmp_
     assert abs(_drive(store, 0.0, 0.5, 0.0)[1]) < 0.1
 
 
+def test_wheels_that_only_slip_a_little_across_their_grip_still_strafe(store: SceneStore, tmp_path: Path):
+    urdf = _urdf(tmp_path, mu=1.2, mu2=0.05)
+    assert len(roller_wheels(ET.parse(urdf).getroot())) == 4
+    _spawn(store, urdf)
+    assert _drive(store, 0.0, 0.5, 0.0) == pytest.approx((0.0, 0.5, 0.0), abs=0.02)
+
+
+def test_a_wheel_rolled_onto_its_axle_grips_tangentially_to_the_floor(tmp_path: Path):
+    urdf = tmp_path / 'omni.urdf'
+    urdf.write_text(
+        '<robot name="r"><link name="base"/><link name="wheel"><collision><geometry><cylinder radius="0.03" length="0.01"/></geometry></collision></link>'
+        '<joint name="spin" type="continuous"><parent link="base"/><child link="wheel"/><origin rpy="1.5708 0 0"/><axis xyz="0 0 1"/></joint>'
+        '<gazebo reference="wheel"><mu1>0.05</mu1><mu2>1.2</mu2><fdir1>0 0 1</fdir1></gazebo></robot>'
+    )
+    (wheel,) = roller_wheels(ET.parse(urdf).getroot())
+    assert wheel.down == pytest.approx((0.0, -1.0, 0.0), abs=1e-4)
+    assert np.abs(wheel.grip) == pytest.approx((1.0, 0.0, 0.0), abs=1e-4)
+
+
 def test_grip_direction_is_read_in_the_frame_it_is_expressed_in(tmp_path: Path):
     turned = roller_wheels(ET.parse(_urdf(tmp_path, wheel_yaw=np.pi / 2)).getroot())
     assert turned[0].link == 'front_left_wheel_link'
