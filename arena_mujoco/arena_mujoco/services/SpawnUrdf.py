@@ -169,22 +169,26 @@ def forget_robots(env_id: int, prefix: str) -> None:
 
 
 def _apply_mesh_parts(robot_spec: mujoco.MjSpec) -> None:
-    """Give every mesh geom its file's material and add a sibling geom per further material of that file."""
+    """Give every mesh geom its file's material and add a sibling geom per further material of that file, meshes of massless geoms with shell inertia."""
     cache = AssetCache()
     for mesh in list(robot_spec.meshes):
         parts = _parts_by_file.get(mesh.file)
         if parts is None:
             continue
+        geoms = [geom for geom in robot_spec.geoms if geom.type == mujoco.mjtGeom.mjGEOM_MESH and geom.meshname == mesh.name]
+        massless = all(geom.density == 0.0 for geom in geoms)
+        if massless:
+            mesh.inertia = mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
         names = [mesh.name]
         for index, part in enumerate(parts[1:], start=1):
             extra = robot_spec.add_mesh()
             extra.name = f'{mesh.name}_part{index}'
             extra.file = part.file
             extra.scale = list(mesh.scale)
+            if massless:
+                extra.inertia = mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
             names.append(extra.name)
-        for geom in list(robot_spec.geoms):
-            if geom.type != mujoco.mjtGeom.mjGEOM_MESH or geom.meshname != mesh.name:
-                continue
+        for geom in geoms:
             for name, part in zip(names, parts, strict=True):
                 target = geom
                 if name != mesh.name:

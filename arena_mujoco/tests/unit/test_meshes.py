@@ -258,6 +258,22 @@ def test_box_prim_wears_its_material_and_a_bare_one_stays_plain(store: SceneStor
     assert crate == -1
 
 
+def test_a_flat_material_part_of_a_link_visual_still_compiles(tmp_path: Path):
+    from arena_mujoco.services.SpawnUrdf import _apply_mesh_parts, _mujoco_compat
+
+    decal = trimesh.Trimesh(vertices=[[-0.2, -0.2, 0.06], [0.2, -0.2, 0.06], [0.2, 0.2, 0.06], [-0.2, 0.2, 0.06]], faces=[[0, 1, 2], [0, 2, 3]])
+    decal.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(baseColorFactor=[0, 255, 0, 255]))
+    body = tmp_path / 'body.glb'
+    trimesh.Scene([_colored_box((1.0, 1.0, 0.1), (0.0, 0.0, 0.0), _RED), decal]).export(str(body))
+    urdf = tmp_path / 'r.urdf'
+    urdf.write_text(f'<robot name="r"><link name="base"><inertial><mass value="140"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial><visual><geometry><mesh filename="file://{body}"/></geometry></visual><collision><geometry><box size="1 1 0.1"/></geometry></collision></link></robot>')
+    compat, _, _ = _mujoco_compat(str(urdf))
+    robot = mujoco.MjSpec.from_file(compat)
+    _apply_mesh_parts(robot)
+    model = robot.compile()
+    assert model.nmesh == 2
+
+
 def test_link_visual_with_a_missing_mesh_is_dropped_and_the_robot_still_loads(tmp_path: Path):
     from arena_mujoco.services.SpawnUrdf import _mujoco_compat
 
