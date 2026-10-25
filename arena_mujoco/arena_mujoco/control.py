@@ -166,30 +166,30 @@ def _limit_force(act: mujoco.MjsActuator, joint: mujoco.MjsJoint) -> None:
         act.forcerange = [low, high]
 
 
-def _add_position_actuator(spec: mujoco.MjSpec, target_joint: str, name: str) -> None:
-    """Add a position-servo actuator (kp position feedback, kv damping) targeting target_joint."""
+def _add_position_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str) -> None:
+    """Add a position-servo actuator (kp position feedback, kv damping) targeting joint."""
     act = spec.add_actuator()
     act.name = name
     act.trntype = mujoco.mjtTrn.mjTRN_JOINT
-    act.target = target_joint
+    act.target = joint.name
     act.gaintype = mujoco.mjtGain.mjGAIN_FIXED
     act.gainprm = _prm(_POSITION_KP)
     act.biastype = mujoco.mjtBias.mjBIAS_AFFINE
     act.biasprm = _prm(0.0, -_POSITION_KP, -_POSITION_KV)
-    _limit_force(act, spec.joint(target_joint))
+    _limit_force(act, joint)
 
 
-def _add_velocity_actuator(spec: mujoco.MjSpec, target_joint: str, name: str) -> None:
-    """Add a velocity-servo actuator (kv velocity feedback) targeting target_joint."""
+def _add_velocity_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str) -> None:
+    """Add a velocity-servo actuator (kv velocity feedback) targeting joint."""
     act = spec.add_actuator()
     act.name = name
     act.trntype = mujoco.mjtTrn.mjTRN_JOINT
-    act.target = target_joint
+    act.target = joint.name
     act.gaintype = mujoco.mjtGain.mjGAIN_FIXED
     act.gainprm = _prm(_VELOCITY_KV)
     act.biastype = mujoco.mjtBias.mjBIAS_AFFINE
     act.biasprm = _prm(0.0, 0.0, -_VELOCITY_KV)
-    _limit_force(act, spec.joint(target_joint))
+    _limit_force(act, joint)
 
 
 def _pre_compile(
@@ -200,7 +200,8 @@ def _pre_compile(
     joint_names: list[str],
 ) -> None:
     """Add position+velocity actuators per actuated joint, record the actuator map."""
-    attached = sorted(j.name for j in _joints_under(robot_root_body) if j.name)
+    joints = {j.name: j for j in _joints_under(robot_root_body) if j.name}
+    attached = sorted(joints)
     actuator_map: dict[str, tuple[str, str]] = {}
     mjcf_map: dict[str, str] = {}
     for urdf_joint in joint_names:
@@ -212,9 +213,9 @@ def _pre_compile(
         add_vel = 'velocity' in ifaces or not add_pos
         pos_name, vel_name = _actuator_names(joint_mjcf)
         if add_pos:
-            _add_position_actuator(spec, joint_mjcf, pos_name)
+            _add_position_actuator(spec, joints[joint_mjcf], pos_name)
         if add_vel:
-            _add_velocity_actuator(spec, joint_mjcf, vel_name)
+            _add_velocity_actuator(spec, joints[joint_mjcf], vel_name)
         actuator_map[urdf_joint] = (pos_name if add_pos else '', vel_name if add_vel else '')
         mjcf_map[urdf_joint] = joint_mjcf
     _pending[robot_entry.prim_name] = actuator_map

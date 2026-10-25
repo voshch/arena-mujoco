@@ -5,7 +5,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from arena_mujoco.control import _add_velocity_actuator
+from arena_mujoco.control import _add_velocity_actuator, _joints_under
 from arena_mujoco.rollers import add_rollers, roller_wheels
 from arena_mujoco.scene import SceneStore
 from arena_mujoco.services.SpawnUrdf import _attach_robot, _mujoco_compat
@@ -53,8 +53,9 @@ def _spawn(store: SceneStore, urdf: Path) -> None:
 
     def build(spec: mujoco.MjSpec) -> mujoco.MjsBody:
         root = _attach_robot(spec, cache, robot, 'r_', 'base_footprint', (0.0, 0.0, 0.002), (1.0, 0.0, 0.0, 0.0), True)
+        joints = {joint.name: joint for joint in _joints_under(root)}
         for name in _WHEELS:
-            _add_velocity_actuator(spec, f'r_{name}_wheel_joint', f'{name}_vel')
+            _add_velocity_actuator(spec, joints[f'r_{name}_wheel_joint'], f'{name}_vel')
         return root
 
     store.add_body(0, build)
