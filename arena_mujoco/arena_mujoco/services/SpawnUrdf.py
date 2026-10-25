@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import mujoco
@@ -141,6 +141,7 @@ class RobotEntry:
     command_interfaces: dict[str, tuple[str, ...]]
     urdf_sensors: dict[str, UrdfSensor]
     sensors: tuple[SensorSpec, ...]
+    initial_positions: dict[str, float] = field(default_factory=dict)
 
 
 _robots: dict[tuple[int, str], RobotEntry] = {}
@@ -208,6 +209,19 @@ def _apply_mesh_parts(robot_spec: mujoco.MjSpec) -> None:
                     target.rgba = list(_RGBA_UNSET)
                 elif target is not geom:
                     target.rgba = list(geom.rgba)
+
+
+def _initial_positions(urdf_path: str) -> dict[str, float]:
+    """Radians per joint from each ros2_control position state interface's initial_value."""
+    positions: dict[str, float] = {}
+    for rc in ET.parse(urdf_path).getroot().iter('ros2_control'):
+        for joint in rc.iter('joint'):
+            name = joint.get('name')
+            for state in joint.findall('state_interface'):
+                param = state.find('param[@name="initial_value"]')
+                if name and state.get('name') == 'position' and param is not None and param.text:
+                    positions[name.replace('-', '_')] = float(param.text)
+    return positions
 
 
 def _mujoco_compat(urdf_path: str) -> tuple[str, dict[str, tuple[str, ...]], dict[str, UrdfSensor]]:
@@ -394,6 +408,7 @@ def _spawn_urdf_cb(
         command_interfaces=command_interfaces,
         urdf_sensors=sensors,
         sensors=tuple(SensorSpec(name=item.name, type=item.type, topic=item.topic, frame=item.frame, sensor=item.sensor or None) for item in request.sensors),
+        initial_positions=_initial_positions(request.urdf_path),
     )
 
     try:

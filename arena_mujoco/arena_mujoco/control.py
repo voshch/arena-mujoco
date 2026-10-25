@@ -230,6 +230,24 @@ def _match_joint(attached: list[str], urdf_joint: str) -> str | None:
     return min(candidates, key=len) if candidates else None
 
 
+def _apply_initial_positions(env_id: int, robot: _Robot, positions: dict[str, float]) -> None:
+    """Start each joint at its initial position, with its position servo holding it there."""
+    store = get_scene_store()
+    model = store.get_model(env_id)
+    data = store.get_data(env_id)
+    if model is None or data is None:
+        return
+    for urdf_joint, position in positions.items():
+        joint_mjcf = robot.mjcf_joints.get(urdf_joint)
+        if joint_mjcf is None:
+            continue
+        data.qpos[model.joint(joint_mjcf).qposadr[0]] = position
+        pos_name = robot.actuators.get(urdf_joint, ('', ''))[0]
+        if pos_name:
+            data.ctrl[model.actuator(pos_name).id] = position
+    mujoco.mj_forward(model, data)
+
+
 def _post_spawn(
     env_id: int,
     name: str,
@@ -240,6 +258,7 @@ def _post_spawn(
     actuator_map = _pending.pop(robot_entry.prim_name, {})
     robot = _Robot(env_id, tuple(joint_names), actuator_map, robot_entry.prim_name)
     robot.mjcf_joints = _pending_mjcf.pop(robot_entry.prim_name, {})
+    _apply_initial_positions(env_id, robot, robot_entry.initial_positions)
     ns = _namespace(robot_entry)
     node = hooks.get_node()
 
