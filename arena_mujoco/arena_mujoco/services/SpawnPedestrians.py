@@ -15,6 +15,7 @@ from geometry_msgs.msg import Pose
 from arena_mujoco import context, hooks
 from arena_mujoco.humans import Rig, actor_rig, add_skin, joint_poses
 from arena_mujoco.scene import MOCAP_CAPSULE_SUFFIX, RejectedBodies
+from arena_mujoco.support import PELVIS_BONE, pelvis_clearance, quat_mul, rest, support_of
 
 from .utils import Service
 
@@ -83,21 +84,6 @@ def _advance(gait: _Gait, rig: Rig, xy: tuple[float, float], now: float) -> None
     gait.clip, gait.xy, gait.time = clip, xy, now
 
 
-def _quat_mul(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Hamilton product of one wxyz quaternion with a stack (n, 4)."""
-    w, x, y, z = left
-    rw, rx, ry, rz = right.T
-    return np.stack(
-        [
-            w * rw - x * rx - y * ry - z * rz,
-            w * rx + x * rw + y * rz - z * ry,
-            w * ry - x * rz + y * rw + z * rx,
-            w * rz + x * ry - y * rx + z * rw,
-        ],
-        axis=1,
-    )
-
-
 def _root(pose: Pose) -> tuple[np.ndarray, np.ndarray]:
     """Position and wxyz quaternion of a wire pose, identity for an unset orientation."""
     p = pose.position
@@ -127,13 +113,14 @@ def _play_clip(env_id: int, handle: int, pose: Pose, name: str) -> None:
     rotation = np.empty(9)
     mujoco.mju_quat2Mat(rotation, quat)
     feet = position + (0.0, 0.0, rig.z_offset)
-    store.set_bone_poses(env_id, handle, feet + positions @ rotation.reshape(3, 3).T, _quat_mul(quat, quaternions))
+    store.set_bone_poses(env_id, handle, feet + positions @ rotation.reshape(3, 3).T, quat_mul(quat, quaternions))
 
 
 def _drive_joints(pedestrians: Sequence[Pedestrian]) -> None:
-    """Pose dressed pedestrians' bones from the joint angles on the wire, all rigs of one skeleton layout in one pass."""
+    """Pose dressed pedestrians' bones from the joint angles on the wire, all rigs of one skeleton layout in one pass,
+    a ped resting on a seat or a bed set down on it (arena_mujoco.support)."""
     store = context.get_scene_store()
-    batches: dict[tuple, list[tuple[tuple[int, int], Rig, np.ndarray, dict[str, float]]]] = {}
+    batches: dict[tuple, list[tuple[tuple[int, int], Rig, np.ndarray, dict[str, float], Pedestrian]]] = {}
     for pedestrian in pedestrians:
         entry = _registry[pedestrian.name]
         rig = _rigs[entry]
@@ -144,10 +131,13 @@ def _drive_joints(pedestrians: Sequence[Pedestrian]) -> None:
         root[:3, :3] = rotation.reshape(3, 3)
         root[:3, 3] = position + (0.0, 0.0, 0.0 if len(rig.sole_bones) else rig.z_offset)
         angles = dict(zip(pedestrian.joint_state.name, pedestrian.joint_state.position, strict=False))
-        batches.setdefault(rig.layout, []).append((entry, rig, root, angles))
+        batches.setdefault(rig.layout, []).append((entry, rig, root, angles, pedestrian))
     for batch in batches.values():
-        positions, quaternions = joint_poses([rig for _, rig, _, _ in batch], np.stack([root for _, _, root, _ in batch]), [angles for _, _, _, angles in batch])
-        for (entry, _, _, _), bone_positions, bone_quaternions in zip(batch, positions, quaternions, strict=True):
+        positions, quaternions = joint_poses([rig for _, rig, _, _, _ in batch], np.stack([root for _, _, root, _, _ in batch]), [angles for _, _, _, angles, _ in batch])
+        for (entry, rig, root, _, pedestrian), bone_positions, bone_quaternions in zip(batch, positions, quaternions, strict=True):
+            support = support_of(pedestrian)
+            if support is not None and PELVIS_BONE in rig.bones:
+                bone_positions, bone_quaternions = rest(support, pelvis_clearance(_dressed[entry]), root, pedestrian.pose.position.z, rig.bones.index(PELVIS_BONE), bone_positions, bone_quaternions)
             store.set_bone_poses(entry[0], entry[1], bone_positions, bone_quaternions)
 
 

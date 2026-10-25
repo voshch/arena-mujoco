@@ -357,6 +357,22 @@ def test_pedestrian_with_joint_state_on_the_wire_follows_it_instead_of_a_clip(st
     assert _skin_vertices(store, 7) == {(round(4.0 - y, 4), round(x, 4), round(z - 0.04, 4)) for x, y, z in _STANDING}
 
 
+def test_pedestrian_sitting_on_a_seat_rests_its_pelvis_on_the_seat_surface(store: SceneStore, actor_sdf: str):
+    (Path(actor_sdf).parent / 'annotation.yaml').write_text('pelvis_clearance: {sit: 0.1, lie: 0.12}\n')
+    _spawn('env_7/peds/doctor', actor_sdf, 3.0)
+    seated = _pedestrian('env_7/peds/doctor', actor_sdf, 4.0)
+    seated.joint_state.name = ['l_knee']
+    seated.joint_state.position = [0.0]
+    seated.interaction_type = 3  # SIT_ON
+    seated.support_height = 0.45
+    update_pedestrians([seated])
+    assert _skin_vertices(store, 7) == _shifted(_STANDING, 4.0, 0.45 + 0.1)  # the fixture's pelvis is its lowest bone
+
+    seated.support_height = Pedestrian.NO_SUPPORT
+    update_pedestrians([seated])
+    assert _skin_vertices(store, 7) == _shifted(_STANDING, 4.0, -0.04)
+
+
 def test_deleting_a_pedestrian_body_takes_its_bones_and_skins_along(store: SceneStore, actor_sdf: str):
     _spawn('env_7/peds/doctor', actor_sdf, 3.0)
     assert store.get_model(7).nskin == 1
