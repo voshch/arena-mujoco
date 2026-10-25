@@ -287,6 +287,16 @@ def _mujoco_compat(urdf_path: str) -> tuple[str, dict[str, tuple[str, ...]], dic
     return tmp.name, command_interfaces, sensors
 
 
+def _exclude_self_contacts(robot_spec: mujoco.MjSpec) -> None:
+    """Exclude contacts between every two colliding bodies of the robot."""
+    colliding = [body.name for body in robot_spec.bodies if any(geom.contype or geom.conaffinity for geom in body.geoms)]
+    excluded = {frozenset((exclude.bodyname1, exclude.bodyname2)) for exclude in robot_spec.excludes}
+    for index, first in enumerate(colliding):
+        for second in colliding[index + 1 :]:
+            if frozenset((first, second)) not in excluded:
+                robot_spec.add_exclude(bodyname1=first, bodyname2=second)
+
+
 def _pose_to_mujoco(
     pose: Pose,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
@@ -341,6 +351,7 @@ def _spawn_urdf_cb(
 
     joint_names = tuple(joint.name for joint in robot_spec.joints if joint.name)
     add_rollers(robot_spec, roller_wheels(ET.parse(request.urdf_path).getroot()))
+    _exclude_self_contacts(robot_spec)
 
     prefix = f'{sanitize_id(request.name)}_'
     pos, quat = _pose_to_mujoco(request.pose)
