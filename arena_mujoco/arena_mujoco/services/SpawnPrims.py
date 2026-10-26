@@ -21,15 +21,17 @@ def _add_prim(env_id: int, prim: Prim) -> bool:
     pos = (pose.position.x, pose.position.y, pose.position.z)
     quat = (pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z)
     scale = (prim.scale.x, prim.scale.y, prim.scale.z)
+    velocity = (prim.velocity.x, prim.velocity.y, prim.velocity.z)
+    moving = velocity if any(velocity) else None
     mesh_path = prim.mesh_path.strip()
     try:
         if mesh_path:
             visuals = [(visual.name, visual.mesh_path) for visual in prim.visuals]
-            store.add_body(env_id, lambda spec: add_mesh_body(spec, cache, prim.name, pos, quat, mesh_path, scale, visuals))
+            store.add_body(env_id, lambda spec: add_mesh_body(spec, cache, prim.name, pos, quat, mesh_path, scale, visuals), moving, comb=prim.comb)
         elif prim.material.name or prim.material.path:
-            store.add_body(env_id, lambda spec: add_box_body(spec, prim.name, pos, quat, scale, ensure_material(spec, cache, prim.material)))
+            store.add_body(env_id, lambda spec: add_box_body(spec, prim.name, pos, quat, scale, ensure_material(spec, cache, prim.material)), moving, comb=prim.comb)
         else:
-            store.add_body(env_id, lambda spec: add_box_body(spec, prim.name, pos, quat, scale))
+            store.add_body(env_id, lambda spec: add_box_body(spec, prim.name, pos, quat, scale), moving, comb=prim.comb)
     except Exception as exc:  # noqa: BLE001 - one unreadable asset must not fail the batch
         hooks.get_node().get_logger().warning(f'prim {prim.name!r} not spawned: {exc!r}')
         return False

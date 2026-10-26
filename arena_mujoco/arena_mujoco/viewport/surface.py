@@ -17,6 +17,7 @@ from viewport_control_msgs.msg import ViewportView
 from viewport_control_msgs.srv import ViewportCapture, ViewportSetProjection, ViewportSetReferenceFrame, ViewportSetView
 
 from arena_mujoco.lights import lighting
+from arena_mujoco.odom import frame_map_offset
 from arena_mujoco.sensors.core import get_renderer, make_stamp
 from arena_mujoco.services.SpawnCeilings import CEILING_GROUP
 from arena_mujoco.services.SpawnUrdf import frame_body
@@ -171,8 +172,9 @@ class Viewport:
             tf = self._tf.lookup_transform(POSE_FRAME, frame, rclpy.time.Time()).transform
         except tf2_ros.TransformException:
             return None
+        dx, dy, dz = frame_map_offset(self._env_id, frame)
         return Pose(
-            (tf.translation.x, tf.translation.y, tf.translation.z),
+            (tf.translation.x - dx, tf.translation.y - dy, tf.translation.z - dz),
             (tf.rotation.w, tf.rotation.x, tf.rotation.y, tf.rotation.z),
         )
 
@@ -245,6 +247,7 @@ class Viewport:
         msg = geometry_msgs.msg.PoseStamped()
         msg.header.stamp = self._node.get_clock().now().to_msg()
         msg.header.frame_id = POSE_FRAME
-        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = self._pose.position
+        dx, dy, dz = frame_map_offset(self._env_id, self._controller.tracked_entity or '')
+        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = self._pose.position[0] + dx, self._pose.position[1] + dy, self._pose.position[2] + dz
         msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z = self._pose.orientation
         self._pose_pub.publish(msg)

@@ -22,6 +22,8 @@ _MOCAP_CAPSULE_SIZE = (0.25, 0.6)
 MOCAP_CAPSULE_SUFFIX = '_capsule'
 
 PHYSICS_DT = 0.002
+MOVING_BODY_KG = 1000.0
+GROUND_Z = -3.0
 
 _logger = logging.getLogger(__name__)
 
@@ -103,6 +105,8 @@ class _EnvScene:
         self.mocap_free: list[int] = []
         self._mocap_next: int = 0
         self.model_edits: int = 0
+        self.velocities: dict[str, tuple[float, float, float]] = {}
+        self.drive: tuple[np.ndarray, np.ndarray] = (np.zeros(0, dtype=int), np.zeros(0))
 
 
 def _new_world_spec() -> mujoco.MjSpec:
@@ -122,7 +126,7 @@ def _new_world_spec() -> mujoco.MjSpec:
         name='ground',
         type=mujoco.mjtGeom.mjGEOM_PLANE,
         size=[0.0, 0.0, 0.05],
-        pos=[0.0, 0.0, 0.0],
+        pos=[0.0, 0.0, GROUND_Z],
     )
     spec.worldbody.add_light(
         name='sun',
@@ -157,9 +161,30 @@ def _drop_unused_assets(scene: _EnvScene) -> None:
     scene.asset_cache.forget(gone)
 
 
+def _resolve_drive(scene: _EnvScene) -> None:
+    """Map the moving bodies to the free-joint dofs their velocity is written into before each step."""
+    model = scene.model
+    dofs: list[int] = []
+    qvel: list[float] = []
+    if model is not None:
+        for name, velocity in scene.velocities.items():
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if body_id < 0 or model.body_jntnum[body_id] != 1:
+                continue
+            adr = int(model.jnt_dofadr[model.body_jntadr[body_id]])
+            dofs.extend(range(adr, adr + 6))
+            qvel.extend((*velocity, 0.0, 0.0, 0.0))
+    scene.drive = (np.array(dofs, dtype=int), np.array(qvel))
+
+
 def _step_scene(scene: _EnvScene, n: int) -> None:
+    data = scene.data
+    assert data is not None
+    dofs, qvel = scene.drive
     for _ in range(n):
-        mujoco.mj_step(scene.model, scene.data)
+        if dofs.size:
+            data.qvel[dofs] = qvel
+        mujoco.mj_step(scene.model, data)
 
 
 class SceneStore:
@@ -180,12 +205,29 @@ class SceneStore:
         assert scene.data is not None
         scene.data.time = self.time
 
-    def add_body(self, env_id: int, body_builder: Callable[[mujoco.MjSpec], mujoco.MjsBody]) -> str:
-        """Append a body via body_builder(spec)->body, register its name, mark dirty."""
+    def add_body(
+        self,
+        env_id: int,
+        body_builder: Callable[[mujoco.MjSpec], mujoco.MjsBody],
+        velocity: tuple[float, float, float] | None = None,
+        comb: bool = False,
+    ) -> str:
+        """Append a body via body_builder(spec)->body, register its name, mark dirty, with velocity a heavy gravity-free body driven at that world-frame velocity, moving and comb bodies never colliding with each other."""
         scene = self._require(env_id)
         body = body_builder(scene.spec)
         name = self._assign_name(scene, body)
         scene.names.add(name)
+        if velocity is not None or comb:
+            for geom in body.geoms:
+                if geom.contype or geom.conaffinity:
+                    geom.contype, geom.conaffinity = 1, 0
+        if velocity is not None:
+            body.add_freejoint().name = f'{name}_free'
+            body.gravcomp = 1.0
+            geoms = list(body.geoms)
+            for geom in geoms:
+                geom.mass = MOVING_BODY_KG / len(geoms)
+            scene.velocities[name] = velocity
         scene.pending.append((name, body))
         scene.dirty = True
         return name
@@ -265,6 +307,7 @@ class SceneStore:
         scene.data = new_data
         scene.dirty = False
         scene.bone_ids.clear()
+        _resolve_drive(scene)
         if rejected is not None:
             raise RejectedBodies(str(rejected)) from rejected
 
@@ -279,6 +322,7 @@ class SceneStore:
         for name, body in scene.pending:
             scene.spec.delete(body)
             scene.names.discard(name)
+            scene.velocities.pop(name, None)
         scene.pending.clear()
         scene.asset_cache.rollback(scene.spec)
 
@@ -322,6 +366,16 @@ class SceneStore:
             body.pos = list(pos)
             body.quat = list(quat)
         mujoco.mj_forward(model, data)
+        return True
+
+    def set_body_velocity(self, env_id: int, name: str, velocity: tuple[float, float, float]) -> bool:
+        """Drive a body added with a velocity at a new world-frame velocity, False for any other body."""
+        scene = self._envs.get(env_id)
+        key = sanitize_id(name)
+        if scene is None or key not in scene.velocities:
+            return False
+        scene.velocities[key] = velocity
+        _resolve_drive(scene)
         return True
 
     def get_body_pose(
@@ -519,6 +573,7 @@ class SceneStore:
             self._drop_bones(scene, handle)
             del scene.mocap_names[handle]
         scene.spec.delete(body)
+        scene.velocities.pop(name, None)
         return True
 
     @staticmethod

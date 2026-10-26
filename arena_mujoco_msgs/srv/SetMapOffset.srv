@@ -1,0 +1,8 @@
+uint32 env_id
+# root body id SpawnUrdf answered
+string name
+# map -> odom translation of that robot
+geometry_msgs/Vector3 translation
+---
+# false => no robot of env_id has that root body
+bool ok

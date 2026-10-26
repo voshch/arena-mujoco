@@ -84,13 +84,14 @@ All services are on the global `/mujoco/` namespace. `env_id` selects the target
 | --- | --- | --- |
 | `mujoco/SpawnUrdf` | `arena_mujoco_msgs/SpawnUrdf` | Load URDF, attach into env spec, fire hooks |
 | `mujoco/SpawnPrims` | `arena_mujoco_msgs/SpawnPrims` | Spawn box or mesh obstacles |
-| `mujoco/EditPrims` | `arena_mujoco_msgs/EditPrims` | Update pose and scale of existing prims |
+| `mujoco/EditPrims` | `arena_mujoco_msgs/EditPrims` | Update pose, scale and velocity of existing prims |
 | `mujoco/SpawnWalls` | `arena_mujoco_msgs/SpawnWalls` | Spawn oriented box walls from start/end points |
 | `mujoco/SpawnFloors` | `arena_mujoco_msgs/SpawnFloors` | Spawn flat floor slabs |
 | `mujoco/SpawnCeilings` | `arena_mujoco_msgs/SpawnCeilings` | Spawn flat ceiling slabs (2 cm thick) |
 | `mujoco/SpawnLights` | `arena_mujoco_msgs/SpawnLights` | Add world lights to the env's light table, no recompile |
 | `mujoco/SetLights` | `arena_mujoco_msgs/SetLights` | Per light, set level and the per-fixture alive mask, or place it at a position turned by a yaw |
 | `mujoco/DeleteLights` | `arena_mujoco_msgs/DeleteLights` | Remove lights by name |
+| `mujoco/SetMapOffset` | `arena_mujoco_msgs/SetMapOffset` | Translate a robot's `map -> odom` transform, identity until set |
 
 ### Pedestrians (reuse `arena_people_msgs`)
 
@@ -128,9 +129,11 @@ The `MujocoSimulator` side additionally generates a bridge URDF with `TopicBased
 
 `prim.visuals` carries the further mesh visuals of a model, each added the same way, visual geoms plus convex colliders. A visual named `glow_<material>` gets materials of its own per placement, named `<prim>:glow_<material>/<part>`, for its light to set the emission of.
 
+A nonzero `prim.velocity` makes the prim a moving body: a free joint with gravity compensation and 1000 kg, whose free-joint velocity the store sets to that world-frame velocity, without spin, before every physics step, so friction carries what stands on it.
+
 `MujocoSimulator.obstacle_spawn` and `obstacle_delete` send every obstacle of a call in one request: a service client keeps ten requests, so a burst of per-obstacle calls loses some and each lost one waits out its timeout. Per obstacle it takes the model's OBJ, else every mesh its SDF visuals point at (the asset database ships SDF plus DAE, with each glow material in a visual and DAE of its own), else the annotated bounding box as a box, and skips with a warning when the asset has none of them. `optim.obstacles:=bbox` prefers the bounding box.
 
-`EditPrims` with `scale` resizes a prim in place: a box takes the scale as its side lengths, mesh geoms switch to their file at that scale. `EditPrims` with `pose` writes the pose into the spec as well as the model, so a moved obstacle stays moved across later recompiles.
+`EditPrims` with `scale` resizes a prim in place: a box takes the scale as its side lengths, mesh geoms switch to their file at that scale. `EditPrims` with `pose` writes the pose into the spec as well as the model, so a moved obstacle stays moved across later recompiles, and teleports a moving prim, which keeps its velocity. `EditPrims` with `velocity` replaces the velocity of a moving prim and answers false for any other.
 
 ### Collision hulls (`mesh_mat.collision_hulls`)
 
@@ -150,7 +153,7 @@ Every structural change needs a fresh `MjModel`, and each compile also rebuilds 
 
 ### Walls, floors, ceilings
 
-All three use `add_box_body`. Walls are built from start/end points: length from XY distance, height from Z span, center and yaw-quaternion derived inline. Floors and ceilings are thin slabs (2 cm) centered on the supplied XY position.
+All three use `add_box_body`. Walls are built from start/end points: length from XY distance, height from Z span, center and yaw-quaternion derived inline. Floors and ceilings are thin slabs (2 cm) centered on the supplied XY position. The ground plane lies at z = -3 m, below the stair and escalator wells, so level floors are what robots stand on.
 
 ### Materials (`arena_mujoco_msgs/Material`)
 
@@ -291,6 +294,7 @@ The server advertises the viewport contract `arena cam` drives on every sim, und
 - `test_sensors.py`: URDF sensor parsing (joint references included), lidar layout from its URDF element, ray casts that skip the carrier and follow REP 117, a fan cast across threads, camera orientation, depth range and clipping, sensor pose pitch, cloud axes, one shared camera per backing sensor, the fixed near plane, contact pairs and the contact message. The render tests skip without an offscreen GL context.
 - `test_meshes.py`: per-material mesh parts, texture size limit, mesh bodies colliding as convex pieces (a ball rests on a table top and stays under it), rays passing through colliders, prim rescaling, the STL face limit, robot rollback, the material albedo order, one compile per delete burst.
 - `test_lights.py`: default lighting kept or replaced, dome and sun, panels lighting only the half space they face, the room fill of a rig as an unattenuated lamp at its center, a large rig reduced to the slots without losing light, finer lamps near the eye, dead fixtures and levels, spot cones and moved lights, the model lights a viewer gets, rendered floor brightness against the fixture's illuminance, a spot pool on a wall box between its corners, the three light services, each lamp's glow following its own light and level across a recompile, a glowing shade rendering its light's color in the dark and black when off, the glow material a light names.
+- `test_odom.py`: the `map -> odom` transform per robot, identity until `SetMapOffset` translates it, and false for an unknown robot.
 - `test_humans.py`: actor SDF parsing, clip keys, bone poses per clip with the root advance removed, wire joint angles turning bones from the idle stance, skinned vertices matching Isaac's converter and provider, the bone map matching Isaac's, the skin a spawned pedestrian wears as the renderer draws it, rays hitting the capsule under it, wire joints taking precedence over clips, the walk clip advancing by distance and idle when standing, bones and skins leaving with their body.
 
 Run with `arena test arena_mujoco`.

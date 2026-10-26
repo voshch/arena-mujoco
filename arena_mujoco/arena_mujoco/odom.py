@@ -30,6 +30,7 @@ class _RobotOdom:
     localization: bool
     odom_pub: rclpy.publisher.Publisher | None
     last_pub_time: float = field(default=-1.0)
+    map_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 _entries: list[_RobotOdom] = []
@@ -70,6 +71,32 @@ def _post_spawn(
             odom_pub=odom_pub,
         )
     )
+
+
+def set_map_offset(env_id: int, prim_name: str, offset: tuple[float, float, float]) -> bool:
+    """Translate the map -> odom transform of the robot whose root body is prim_name, False when env_id has no such robot."""
+    entries = [entry for entry in _entries if entry.env_id == env_id and entry.prim_name == prim_name]
+    for entry in entries:
+        entry.map_offset = offset
+    return bool(entries)
+
+
+def frame_map_offset(env_id: int, frame: str) -> tuple[float, float, float]:
+    """map -> odom translation of the robot of env_id whose TF frames carry frame, zero for any other frame."""
+    for entry in _entries:
+        if entry.env_id == env_id and entry.tf_prefix and frame.lstrip('/').startswith(entry.tf_prefix):
+            return entry.map_offset
+    return (0.0, 0.0, 0.0)
+
+
+def _map_transform(entry: _RobotOdom, stamp: Time) -> geometry_msgs.msg.TransformStamped:
+    map_tf = geometry_msgs.msg.TransformStamped()
+    map_tf.header.stamp = stamp
+    map_tf.header.frame_id = 'map'
+    map_tf.child_frame_id = entry.odom_frame_id
+    map_tf.transform.translation.x, map_tf.transform.translation.y, map_tf.transform.translation.z = entry.map_offset
+    map_tf.transform.rotation.w = 1.0
+    return map_tf
 
 
 def _despawn(env_id: int, robot_entry: RobotEntry) -> None:
@@ -133,12 +160,7 @@ def _pump() -> None:
         tf_msg.transform.rotation.z = qz
         transforms.append(tf_msg)
 
-        map_tf = geometry_msgs.msg.TransformStamped()
-        map_tf.header.stamp = stamp
-        map_tf.header.frame_id = 'map'
-        map_tf.child_frame_id = entry.odom_frame_id
-        map_tf.transform.rotation.w = 1.0
-        transforms.append(map_tf)
+        transforms.append(_map_transform(entry, stamp))
 
         if entry.odom_pub is None:
             continue
@@ -184,4 +206,4 @@ def setup() -> None:
     """No-op marker; import side-effects handle registration."""
 
 
-__all__ = ['setup']
+__all__ = ['frame_map_offset', 'set_map_offset', 'setup']

@@ -72,6 +72,12 @@ def _box(name: str, pos: tuple[float, float, float], half: tuple[float, float, f
     return build
 
 
+def _floor(spec: mujoco.MjSpec) -> mujoco.MjsBody:
+    body = spec.worldbody.add_body(name='floor')
+    body.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0.0, 0.0, 0.05])
+    return body
+
+
 def _carrier(sensor: UrdfSensor, height: float):
     def build(spec: mujoco.MjSpec) -> mujoco.MjsBody:
         body = spec.worldbody.add_body(name='cam_link', pos=[0.0, 0.0, height])
@@ -85,6 +91,7 @@ def _carrier(sensor: UrdfSensor, height: float):
 def store() -> SceneStore:
     store = SceneStore()
     store.ensure_env(0)
+    store.add_body(0, _floor)
     context.set_scene_store(store)
     return store
 
@@ -199,9 +206,10 @@ def test_contact_reports_touching_bodies_outside_the_own_tree(store: SceneStore)
         body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
         return sorted({int(model.geom_bodyid[other]) for _, _, other in outside_contacts(model, data, body)})
 
+    floor = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'floor')
     resting = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'resting')
     stacked = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'stacked')
-    assert touching('resting') == [0, stacked]
+    assert touching('resting') == [floor, stacked]
     assert touching('stacked') == [resting]
     assert touching('hovering') == []
 

@@ -1,4 +1,4 @@
-"""EditPrims service handler: update pose and scale of existing prim bodies."""
+"""EditPrims service handler: update pose, scale and velocity of existing prim bodies."""
 
 from __future__ import annotations
 
@@ -35,6 +35,9 @@ def _edit_prims_cb(
         if request.scale:
             scale = (prim.scale.x, prim.scale.y, prim.scale.z)
             ok = min(scale) > 0.0 and store.edit_body(env_id, prim.name, lambda spec, body, scale=scale: scale_body(spec, store.asset_cache(env_id), body, scale)) and ok
+
+        if request.velocity:
+            ok = store.set_body_velocity(env_id, prim.name, (prim.velocity.x, prim.velocity.y, prim.velocity.z)) and ok
 
         results.append(ok)
 

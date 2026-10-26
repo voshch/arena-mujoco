@@ -7,3 +7,7 @@ string mesh_path
 Material material
 # further visuals of a mesh prim, each also a collider
 PrimVisual[] visuals
+# world-frame velocity of a gravity-free moving box, zero => static
+geometry_msgs/Vector3 velocity
+# static box moving boxes pass through, an escalator comb plate
+bool comb

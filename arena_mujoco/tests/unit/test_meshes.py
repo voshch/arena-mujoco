@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 import trimesh
 from arena_mujoco_msgs.msg import Material, Prim, Scale
+from arena_mujoco_msgs.srv import EditPrims
+from geometry_msgs.msg import Point, Pose, Vector3
 from PIL import Image
 
 from arena_mujoco.mesh_mat import COLLISION_GROUP, add_box_body, add_hull_geoms, add_mesh_body, collision_hulls, ensure_material, mesh_parts, scale_body
@@ -75,6 +77,12 @@ def test_textured_part_keeps_uv_and_a_size_limited_texture(tmp_path: Path):
         assert image.getpixel((5, 5)) == (10, 200, 30)
 
 
+def _floor(spec: mujoco.MjSpec) -> mujoco.MjsBody:
+    body = spec.worldbody.add_body(name='floor')
+    body.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0.0, 0.0, 0.05])
+    return body
+
+
 def _ball(name: str, pos: tuple[float, float, float]):
     def build(spec: mujoco.MjSpec) -> mujoco.MjsBody:
         body = spec.worldbody.add_body(name=name, pos=list(pos))
@@ -94,6 +102,7 @@ def test_mesh_body_shows_its_materials_and_collides_as_convex_pieces(store: Scen
     store.add_body(0, lambda spec: add_mesh_body(spec, cache, 'table_2', (5.0, 0.0, 0.05), (1.0, 0.0, 0.0, 0.0), path))
     store.add_body(0, _ball('on_top', (2.0, 0.0, 0.8)))
     store.add_body(0, _ball('below', (2.0, 0.0, 0.05)))
+    store.add_body(0, _floor)
     store.recompile(0)
     model = store.get_model(0)
     meshes = np.flatnonzero(model.geom_type == mujoco.mjtGeom.mjGEOM_MESH)
@@ -272,6 +281,27 @@ def test_a_flat_material_part_of_a_link_visual_still_compiles(tmp_path: Path):
     _apply_mesh_parts(robot)
     model = robot.compile()
     assert model.nmesh == 2
+
+
+def test_edit_prims_sets_the_velocity_of_moving_prims_only(store: SceneStore):
+    from arena_mujoco import context
+    from arena_mujoco.services.EditPrims import _edit_prims_cb
+    from arena_mujoco.services.SpawnPrims import _add_prim
+
+    context.set_scene_store(store)
+    assert _add_prim(0, Prim(name='tread', pose=Pose(position=Point(z=1.0)), scale=Scale(x=1.0, y=1.0, z=0.1), velocity=Vector3(x=0.5)))
+    assert _add_prim(0, Prim(name='crate', pose=Pose(position=Point(x=5.0, z=1.0)), scale=Scale(x=1.0, y=1.0, z=1.0)))
+    store.recompile(0)
+    model = store.get_model(0)
+    tread, crate = (mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in ('tread', 'crate'))
+    assert (model.body_jntnum[tread], model.body_jntnum[crate]) == (1, 0)
+
+    request = EditPrims.Request(env_id=0, prims=[Prim(name='tread', velocity=Vector3(y=-1.0)), Prim(name='crate', velocity=Vector3(x=1.0)), Prim(name='ghost')], velocity=True)
+    assert list(_edit_prims_cb(request, EditPrims.Response()).ret) == [True, False, False]
+    store.step(500)
+    mujoco.mj_forward(model, store.get_data(0))
+    assert store.get_body_pose(0, 'tread')[0] == pytest.approx((0.0, -1.0, 1.0), abs=1e-3)
+    assert store.get_body_pose(0, 'crate')[0] == pytest.approx((5.0, 0.0, 1.0))
 
 
 def test_link_visual_with_a_missing_mesh_is_dropped_and_the_robot_still_loads(tmp_path: Path):

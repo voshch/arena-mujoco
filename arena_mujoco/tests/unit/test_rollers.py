@@ -62,6 +62,12 @@ def _spawn(store: SceneStore, urdf: Path) -> None:
     store.recompile(0)
 
 
+def _floor(spec: mujoco.MjSpec) -> mujoco.MjsBody:
+    body = spec.worldbody.add_body(name='floor')
+    body.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0.0, 0.0, 0.05])
+    return body
+
+
 def _drive(store: SceneStore, vx: float, vy: float, wz: float) -> np.ndarray:
     """Body twist (vx, vy, wz) averaged over two seconds of holding the wheel speeds of the commanded twist."""
     model = store.get_model(0)
@@ -93,6 +99,7 @@ def _drive(store: SceneStore, vx: float, vy: float, wz: float) -> np.ndarray:
 def store() -> SceneStore:
     store = SceneStore()
     store.ensure_env(0)
+    store.add_body(0, _floor)
     return store
 
 

@@ -2,7 +2,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from arena_mujoco.scene import PHYSICS_DT, RejectedBodies, SceneStore
+from arena_mujoco.scene import MOVING_BODY_KG, PHYSICS_DT, RejectedBodies, SceneStore
 
 
 def _box(name: str, pos: tuple[float, float, float], free: bool = False):
@@ -171,3 +171,61 @@ def test_discarding_pending_bodies_also_drops_what_references_them(store: SceneS
     model = store.get_model(0)
     assert (model.nbody, model.nu, model.nsensor) == (1, 0, 0)
     assert not store.find(0, 'robot')
+
+
+def _tread(name: str, pos: tuple[float, float, float]):
+    def build(spec: mujoco.MjSpec) -> mujoco.MjsBody:
+        body = spec.worldbody.add_body(name=name, pos=list(pos))
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.5, 0.5, 0.05])
+        return body
+
+    return build
+
+
+def _settled_pos(store: SceneStore, name: str) -> tuple[float, float, float]:
+    mujoco.mj_forward(store.get_model(0), store.get_data(0))
+    return store.get_body_pose(0, name)[0]
+
+
+def test_moving_box_travels_at_its_velocity_and_carries_a_box_resting_on_it(store: SceneStore):
+    store.add_body(0, _tread('tread', (0.0, 0.0, 1.0)), velocity=(0.5, 0.0, 0.2))
+    store.add_body(0, _box('load', (0.0, 0.0, 1.15), free=True))
+    store.recompile(0)
+    store.step(500)
+    assert _settled_pos(store, 'tread') == pytest.approx((0.5, 0.0, 1.2), abs=1e-3)
+    assert _settled_pos(store, 'load') == pytest.approx((0.5, 0.0, 1.35), abs=0.03)
+    assert store.get_model(0).body_mass[mujoco.mj_name2id(store.get_model(0), mujoco.mjtObj.mjOBJ_BODY, 'tread')] == pytest.approx(MOVING_BODY_KG)
+
+
+def test_moving_box_keeps_its_drive_across_a_teleport_and_a_recompile_until_removed(store: SceneStore):
+    store.add_body(0, _tread('tread', (0.0, 0.0, 1.0)), velocity=(0.5, 0.0, 0.0))
+    store.add_body(0, _box('crate', (5.0, 0.0, 0.1)))
+    store.recompile(0)
+    assert store.set_body_velocity(0, 'tread', (0.0, -1.0, 0.0))
+    assert not store.set_body_velocity(0, 'crate', (1.0, 0.0, 0.0))
+    assert not store.set_body_velocity(0, 'ghost', (1.0, 0.0, 0.0))
+    assert store.set_body_pose(0, 'tread', (2.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.0))
+    store.add_body(0, _box('late', (9.0, 9.0, 0.1)))
+    store.recompile(0)
+    store.step(250)
+    assert _settled_pos(store, 'tread') == pytest.approx((2.0, -0.5, 1.0), abs=1e-3)
+    assert store.remove(0, 'tread')
+    store.recompile(0)
+    assert not store.set_body_velocity(0, 'tread', (0.5, 0.0, 0.0))
+    store.step(10)
+
+
+def test_comb_and_moving_boxes_pass_through_each_other_but_plain_boxes_keep_default_contacts(store: SceneStore):
+    store.add_body(0, _box('plate', (0.0, 0.0, 1.2)), comb=True)
+    store.add_body(0, _tread('tread', (0.0, 0.0, 1.0)), velocity=(0.5, 0.0, 0.0))
+    store.add_body(0, _box('crate', (5.0, 0.0, 0.1)))
+    store.recompile(0)
+    model = store.get_model(0)
+
+    def contacts(name: str) -> tuple[int, int]:
+        geom = model.body_geomadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)]
+        return int(model.geom_contype[geom]), int(model.geom_conaffinity[geom])
+
+    assert contacts('plate') == (1, 0)
+    assert contacts('tread') == (1, 0)
+    assert contacts('crate') == (1, 1)
