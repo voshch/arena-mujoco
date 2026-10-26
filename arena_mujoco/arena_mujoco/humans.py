@@ -462,7 +462,7 @@ def actor_rig(sdf_path: str) -> Rig:
     if rig is None:
         actor = read_actor(sdf_path)
         sources = [actor.skin, *(actor.clips[name] for name in sorted(actor.clips))]
-        out_dir = cache_entry(sources, f'bones at joints, legs at bind:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
+        out_dir = cache_entry(sources, f'bones at joints, legs hanging:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
         rig = _rigs[sdf_path] = _read_rig(out_dir, actor.z_offset)
     return rig
 
