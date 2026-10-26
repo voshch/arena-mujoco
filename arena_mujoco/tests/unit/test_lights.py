@@ -12,7 +12,7 @@ from geometry_msgs.msg import Point, Pose, Vector3
 
 from arena_mujoco import context
 from arena_mujoco.lights import DEFAULT_SUN, DOME_GAIN, FILL_GAIN, GLOW_RESPONSE, REFERENCE_LUX, REFLECTANCE, RIG_GAIN, SLOTS, Headlight, Light, Lighting, glow_material, lighting
-from arena_mujoco.mesh_mat import COLLISION_GROUP
+from arena_mujoco.mesh_mat import COLLISION_GROUP, add_box_body
 from arena_mujoco.scene import SceneStore
 from arena_mujoco.services.Lights import _delete_lights_cb, _set_lights_cb, _spawn_lights_cb
 from arena_mujoco.services.SpawnPrims import _add_prim
@@ -255,6 +255,33 @@ def test_floor_under_a_panel_renders_at_its_illuminance_and_dark_when_off(room: 
     assert _floor(room, env) == 0.0
     env.clear()
     assert _floor(room, env) > 200.0
+
+
+def test_spot_on_a_wall_box_renders_a_pool_between_its_corners():
+    store = SceneStore()
+    store.ensure_env(0)
+    store.add_body(0, lambda spec: add_box_body(spec, name='wall', pos=(0.0, 0.0, 1.25), quat=(1.0, 0.0, 0.0, 0.0), size=(8.0, 2.5, 0.1), geom_quat=(0.7071067811865476, 0.7071067811865476, 0.0, 0.0)))
+    store.recompile(0)
+    model, data = store.get_model(0), store.get_data(0)
+    mujoco.mj_forward(model, data)
+    try:
+        renderer = mujoco.Renderer(model, _SIZE, _SIZE)
+    except Exception as exc:
+        pytest.skip(f'no offscreen GL: {exc}')
+    camera = mujoco.MjvCamera()
+    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    camera.lookat[:] = (0.3, 0.05, 1.0)
+    camera.distance = 1.5
+    camera.azimuth = -90.0
+    camera.elevation = 0.0
+    env = Lighting()
+    env.spawn('spot', Light(shape='disk', positions=[(0.3, 0.55, 1.0)], direction=(0.0, -1.0, 0.0), flux=500.0, color=_WHITE, cone_deg=50.0))
+    renderer.update_scene(data, camera)
+    env.shade(renderer.scene, (0.3, 1.55, 1.0))
+    image = renderer.render()
+    renderer.close()
+    assert image[_SIZE // 2, _SIZE // 2].mean() > 60.0
+    assert image[_SIZE // 2, 4].mean() < 10.0
 
 
 def test_light_services_spawn_set_and_delete_per_env():

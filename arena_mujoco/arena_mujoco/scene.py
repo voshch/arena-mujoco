@@ -27,6 +27,7 @@ _logger = logging.getLogger(__name__)
 
 _RENDER_EXTENT_M = 20.0
 _RENDER_ZNEAR_M = 0.01
+_BOX_FACE_QUADS = 64
 
 _STEP_WORKERS = min(16, os.cpu_count() or 1)
 
@@ -111,6 +112,7 @@ def _new_world_spec() -> mujoco.MjSpec:
     spec.option.timestep = PHYSICS_DT
     spec.stat.extent = _RENDER_EXTENT_M
     spec.visual.map.znear = _RENDER_ZNEAR_M / _RENDER_EXTENT_M
+    spec.visual.quality.numquads = _BOX_FACE_QUADS
     spec.visual.global_.offwidth = CAPTURE_WIDTH
     spec.visual.global_.offheight = CAPTURE_HEIGHT
     spec.visual.headlight.ambient = list(DEFAULT_AMBIENT)
