@@ -236,6 +236,38 @@ def _continuous(quaternions: np.ndarray) -> np.ndarray:
     return np.concatenate([quaternions[:1], quaternions[1:] * signs[..., None]])
 
 
+def _swing(direction: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Shortest rotation turning direction onto target."""
+    a = direction / np.linalg.norm(direction)
+    b = target / np.linalg.norm(target)
+    axis = np.cross(a, b)
+    sin = float(np.linalg.norm(axis))
+    if sin < 1e-12:
+        return np.eye(3)
+    x, y, z = axis / sin
+    cross = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
+    return np.eye(3) + sin * cross + (1.0 - float(a @ b)) * (cross @ cross)
+
+
+def _hang_legs(skeleton: Sequence[_Node], neutral: np.ndarray) -> np.ndarray:
+    """Local transforms (nodes, 4, 4) with each UpLeg and Leg swung to point straight down and each Foot keeping its world orientation."""
+    parents = [node.parent for node in skeleton]
+    index = {node.joint: i for i, node in enumerate(skeleton) if node.joint is not None}
+    hung = neutral.copy()
+    for side in ('Left', 'Right'):
+        names = [f'{side}{bone}' for bone in ('UpLeg', 'Leg', 'Foot')]
+        if not all(name in index for name in names):
+            continue
+        upleg, leg, foot = (index[name] for name in names)
+        foot_world = _worlds(parents, hung[:, None])[foot, 0, :3, :3]
+        for bone, child in ((upleg, leg), (leg, foot)):
+            worlds = _worlds(parents, hung[:, None])[:, 0]
+            turned = _swing(worlds[child, :3, 3] - worlds[bone, :3, 3], np.array([0.0, 0.0, -1.0])) @ worlds[bone, :3, :3]
+            hung[bone, :3, :3] = worlds[parents[bone], :3, :3].T @ turned
+        hung[foot, :3, :3] = _worlds(parents, hung[:, None])[parents[foot], 0, :3, :3].T @ foot_world
+    return hung
+
+
 def _diffuse(material: collada.material.Material, mesh_dir: Path) -> tuple[tuple[float, float, float, float] | None, Image.Image | None]:
     """Diffuse color or image of a COLLADA material, both None for an image that is mostly transparent."""
     import collada
@@ -285,7 +317,7 @@ def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
     neutral = _locals(skeleton, {joint: matrices[:1] for joint, matrices in stance.items() if joint not in roots | _BIND_STANCE}, 1)[0][:, 0]
     jointed = [index for index, node in enumerate(skeleton) if node.joint is not None]
     neutral[jointed, :3, :3] = _orthonormal(neutral[jointed, :3, :3])
-    arrays['neutral'] = neutral
+    arrays['neutral'] = _hang_legs(skeleton, neutral)
     arrays['bone_nodes'] = bone_nodes
     arrays['inverse_binds'] = inverse_binds
     arrays['bind_positions'] = np.linalg.inv(inverse_binds)[:, :3, 3] * scale
