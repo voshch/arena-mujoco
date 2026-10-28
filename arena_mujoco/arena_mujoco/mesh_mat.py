@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import itertools
 import json
@@ -24,6 +25,7 @@ from arena_mujoco.lights import glow_material
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from types import ModuleType
 
     import trimesh
     import trimesh.visual
@@ -225,16 +227,24 @@ def _trimesh_groups(source: Path) -> list[PartGroup]:
 _hulls_cache: dict[str, tuple[str, ...]] = {}
 
 
+@functools.cache
+def _coacd() -> ModuleType:
+    """The coacd module, its log level set once before any decomposition runs."""
+    import coacd
+
+    coacd.set_log_level('error')
+    return coacd
+
+
 def _write_hulls(out_dir: Path, stem: str, source: Path) -> None:
     """Write the convex pieces of source as <stem>_hull<n>.obj into out_dir, plus the hulls.json manifest."""
-    import coacd
     import trimesh
 
+    coacd = _coacd()
     loaded = trimesh.load(str(source))
     mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
     if not isinstance(mesh, trimesh.Trimesh):
         raise ValueError(f'{source} holds no triangle mesh')
-    coacd.set_log_level('error')
     pieces = coacd.run_coacd(
         coacd.Mesh(np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int32)),
         threshold=_HULL_CONCAVITY,
@@ -271,6 +281,7 @@ def prepare_hulls(paths: Sequence[str]) -> None:
 
     missing = [path for path in dict.fromkeys(paths) if path not in _hulls_cache]
     if missing:
+        _coacd()
         with ThreadPoolExecutor(max_workers=_HULL_WORKERS, thread_name_prefix='mj_hull') as pool:
             list(pool.map(decompose, missing))
 
@@ -609,14 +620,26 @@ def add_mesh_body(
     body.pos = list(pos)
     body.quat = list(quat)
     add_mesh_geoms(spec, cache, body, mesh_path, scale)
+    add_visual_geoms(spec, cache, body, name, visuals, scale)
+    return body
+
+
+def add_visual_geoms(
+    spec: mujoco.MjSpec,
+    cache: AssetCache,
+    body: mujoco.MjsBody,
+    owner: str,
+    visuals: Sequence[tuple[str, str]],
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> None:
+    """Give body the geoms and colliders of further (visual name, mesh file) visuals, a glow_<material> visual glowing in owner's light."""
     for visual, path in visuals:
         if visual.startswith(GLOW_VISUAL_PREFIX):
-            add_glow_geoms(spec, cache, body, glow_material(name, visual.removeprefix(GLOW_VISUAL_PREFIX)), mesh_parts(path), scale)
+            add_glow_geoms(spec, cache, body, glow_material(owner, visual.removeprefix(GLOW_VISUAL_PREFIX)), mesh_parts(path), scale)
         else:
             add_part_geoms(spec, cache, body, mesh_parts(path), scale)
         prepare_hulls([path])
         add_hull_geoms(spec, cache, body, collision_hulls(path), scale)
-    return body
 
 
 __all__ = [
@@ -631,6 +654,7 @@ __all__ = [
     'add_mesh_body',
     'add_mesh_geoms',
     'add_part_geoms',
+    'add_visual_geoms',
     'add_plane_body',
     'cache_entry',
     'cached_parts',

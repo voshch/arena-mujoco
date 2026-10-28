@@ -2,6 +2,7 @@
 
 import collections.abc
 
+from .Articulated import drive_articulated_service, spawn_articulated_service
 from .DeletePedestrians import delete_pedestrians_service
 from .EditPrims import edit_prims_service
 from .Lights import delete_lights_service, set_lights_service, spawn_lights_service
@@ -16,10 +17,12 @@ from .utils import Service
 
 services: collections.abc.Iterable[Service] = (
     delete_lights_service,
+    drive_articulated_service,
     delete_pedestrians_service,
     edit_prims_service,
     move_pedestrians_service,
     set_lights_service,
+    spawn_articulated_service,
     spawn_ceilings_service,
     spawn_floors_service,
     spawn_lights_service,

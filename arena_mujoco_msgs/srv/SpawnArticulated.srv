@@ -1,0 +1,9 @@
+uint32 env_id
+string name
+geometry_msgs/Pose pose
+# mesh scale, the link frames and inertias come scaled
+Scale scale
+# parents before children
+ArticulatedLink[] links
+---
+bool ret
