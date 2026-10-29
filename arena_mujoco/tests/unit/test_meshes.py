@@ -283,24 +283,26 @@ def test_a_flat_material_part_of_a_link_visual_still_compiles(tmp_path: Path):
     assert model.nmesh == 2
 
 
-def test_edit_prims_sets_the_velocity_of_moving_prims_only(store: SceneStore):
+def test_edit_prims_sets_the_velocity_of_non_static_prims_only(store: SceneStore):
     from arena_mujoco import context
     from arena_mujoco.services.EditPrims import _edit_prims_cb
     from arena_mujoco.services.SpawnPrims import _add_prim
 
     context.set_scene_store(store)
-    assert _add_prim(0, Prim(name='tread', pose=Pose(position=Point(z=1.0)), scale=Scale(x=1.0, y=1.0, z=0.1), velocity=Vector3(x=0.5)))
-    assert _add_prim(0, Prim(name='crate', pose=Pose(position=Point(x=5.0, z=1.0)), scale=Scale(x=1.0, y=1.0, z=1.0)))
+    assert _add_prim(0, Prim(name='tread', pose=Pose(position=Point(z=1.0)), scale=Scale(x=1.0, y=1.0, z=0.1), velocity=Vector3(x=0.5), is_static=False))
+    assert _add_prim(0, Prim(name='stopped', pose=Pose(position=Point(x=-5.0, z=1.0)), scale=Scale(x=1.0, y=1.0, z=0.1), is_static=False))
+    assert _add_prim(0, Prim(name='crate', pose=Pose(position=Point(x=5.0, z=1.0)), scale=Scale(x=1.0, y=1.0, z=1.0), velocity=Vector3(x=0.5)))
     store.recompile(0)
     model = store.get_model(0)
-    tread, crate = (mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in ('tread', 'crate'))
-    assert (model.body_jntnum[tread], model.body_jntnum[crate]) == (1, 0)
+    tread, stopped, crate = (mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in ('tread', 'stopped', 'crate'))
+    assert (model.body_jntnum[tread], model.body_jntnum[stopped], model.body_jntnum[crate]) == (1, 1, 0)
 
-    request = EditPrims.Request(env_id=0, prims=[Prim(name='tread', velocity=Vector3(y=-1.0)), Prim(name='crate', velocity=Vector3(x=1.0)), Prim(name='ghost')], velocity=True)
-    assert list(_edit_prims_cb(request, EditPrims.Response()).ret) == [True, False, False]
+    request = EditPrims.Request(env_id=0, prims=[Prim(name='tread', velocity=Vector3(y=-1.0)), Prim(name='stopped', velocity=Vector3(y=1.0)), Prim(name='crate', velocity=Vector3(x=1.0)), Prim(name='ghost')], velocity=True)
+    assert list(_edit_prims_cb(request, EditPrims.Response()).ret) == [True, True, False, False]
     store.step(500)
     mujoco.mj_forward(model, store.get_data(0))
     assert store.get_body_pose(0, 'tread')[0] == pytest.approx((0.0, -1.0, 1.0), abs=1e-3)
+    assert store.get_body_pose(0, 'stopped')[0] == pytest.approx((-5.0, 1.0, 1.0), abs=1e-3)
     assert store.get_body_pose(0, 'crate')[0] == pytest.approx((5.0, 0.0, 1.0))
 
 

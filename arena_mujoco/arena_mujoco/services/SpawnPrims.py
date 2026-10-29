@@ -22,7 +22,7 @@ def _add_prim(env_id: int, prim: Prim) -> bool:
     quat = (pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z)
     scale = (prim.scale.x, prim.scale.y, prim.scale.z)
     velocity = (prim.velocity.x, prim.velocity.y, prim.velocity.z)
-    moving = velocity if any(velocity) else None
+    moving = None if prim.is_static else velocity
     mesh_path = prim.mesh_path.strip()
     try:
         if mesh_path:
