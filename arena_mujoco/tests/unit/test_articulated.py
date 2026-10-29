@@ -165,3 +165,22 @@ def test_an_object_that_does_not_compile_leaves_nothing_behind(store: SceneStore
         model = store.get_model(0)
         assert (model.nbody, model.nu, model.nexclude, model.nmesh) == (1, 0, 0, 0)
     assert _spawn_articulated_cb(_cabinet(tmp_path), SpawnArticulated.Response()).ret
+
+
+def test_a_sprung_door_swings_back_to_its_rest_and_its_surfaces_take_the_link_material(store: SceneStore, tmp_path: Path):
+    request = _cabinet(tmp_path)
+    body, door = request.links
+    door.dynamics.spring_stiffness = 20.0
+    door.dynamics.spring_rest = 0.3
+    door.has_material, door.static_friction, door.dynamic_friction, door.restitution = True, 0.9, 0.6, 0.2
+    assert _spawn_articulated_cb(request, SpawnArticulated.Response()).ret
+    model = store.get_model(0)
+    joint = model.joint('env_0_Obstacles_cabinet__door')
+    assert model.jnt_stiffness[joint.id] == pytest.approx(20.0)
+    assert model.qpos_spring[joint.qposadr[0]] == pytest.approx(0.3)
+    door_body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'env_0_Obstacles_cabinet__door')
+    carcass = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'env_0_Obstacles_cabinet')
+    assert {round(float(model.geom_friction[geom][0]), 6) for geom in range(model.ngeom) if model.geom_bodyid[geom] == door_body} == {0.6}
+    assert {round(float(model.geom_friction[geom][0]), 6) for geom in range(model.ngeom) if model.geom_bodyid[geom] == carcass} == {1.0}
+    _run(store, 3.0)
+    assert _drive(0.0, False) == pytest.approx([0.3], abs=0.05)

@@ -64,6 +64,9 @@ def _add_link(spec: mujoco.MjSpec, cache: AssetCache, root: str, parent: mujoco.
     if link.mesh_path:
         add_mesh_geoms(spec, cache, body, link.mesh_path, scale)
         add_visual_geoms(spec, cache, body, root, [(visual.name, visual.mesh_path) for visual in link.visuals], scale)
+    if link.has_material:
+        for geom in body.geoms:
+            geom.friction = [link.dynamic_friction, geom.friction[1], geom.friction[2]]
     obj.bodies.append(body.name)
     if not link.parent or link.type == ArticulatedLink.FIXED:
         return body
@@ -80,6 +83,8 @@ def _add_link(spec: mujoco.MjSpec, cache: AssetCache, root: str, parent: mujoco.
     joint.damping = [dynamics.damping, 0.0, 0.0]
     joint.frictionloss = dynamics.friction
     joint.armature = dynamics.armature
+    joint.stiffness = [dynamics.spring_stiffness, 0.0, 0.0]
+    joint.springref = math.degrees(dynamics.spring_rest) if link.type != ArticulatedLink.PRISMATIC and spec.compiler.degree else dynamics.spring_rest
     entry = _Joint(joint.name, f'{joint.name}{DRIVE_SUFFIX}', dynamics.stiffness, dynamics.drive_damping, link.type == ArticulatedLink.CONTINUOUS)
     actuator = spec.add_actuator()
     actuator.name = entry.actuator

@@ -13,6 +13,11 @@ PrimVisual[] visuals
 float64 mass
 geometry_msgs/Point center
 geometry_msgs/Vector3 moments
+# surface material of the link's colliders, read when has_material
+bool has_material
+float64 static_friction
+float64 dynamic_friction
+float64 restitution
 # joint to the parent, unused on the root
 string joint
 uint8 type
