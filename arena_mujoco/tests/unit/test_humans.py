@@ -199,6 +199,20 @@ def test_joint_poses_stand_the_lowest_sole_point_at_the_root_height(actor_sdf: s
         assert positions[0, :, :2] == pytest.approx(unplanted[0, :, :2])
 
 
+def test_joint_poses_plant_the_soles_along_a_tipped_root_up_axis(actor_sdf: str):
+    rig = dataclasses.replace(actor_rig(actor_sdf), sole_bones=np.array([1]), sole_points=np.array([[0.1, 0.0, 1.0]]))
+    root = np.eye(4)[None]
+    root[0, :3, :3] = [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]
+    root[0, :3, 3] = (1.0, 2.0, 0.6)
+    positions, quaternions = joint_poses([rig], root, [{}])
+    rotation = np.empty(9)
+    mujoco.mju_quat2Mat(rotation, quaternions[0, 1])
+    sole = rotation.reshape(3, 3) @ (rig.sole_points[0] - rig.bind_positions[1]) + positions[0, 1]
+    assert (sole - root[0, :3, 3]) @ root[0, :3, 2] == pytest.approx(0.0)
+    unplanted, _ = joint_poses([actor_rig(actor_sdf)], root, [{}])
+    assert positions[0, :, 1:] == pytest.approx(unplanted[0, :, 1:])
+
+
 def test_quaternions_match_mujoco_for_any_rotation():
     rng = np.random.default_rng(0)
     quaternions = rng.normal(size=(200, 4))

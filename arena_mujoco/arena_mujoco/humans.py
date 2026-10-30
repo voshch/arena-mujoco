@@ -462,7 +462,7 @@ def actor_rig(sdf_path: str) -> Rig:
     if rig is None:
         actor = read_actor(sdf_path)
         sources = [actor.skin, *(actor.clips[name] for name in sorted(actor.clips))]
-        out_dir = cache_entry(sources, f'bones at joints, legs at bind:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
+        out_dir = cache_entry(sources, f'bones at joints, legs hanging:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
         rig = _rigs[sdf_path] = _read_rig(out_dir, actor.z_offset)
     return rig
 
@@ -513,7 +513,7 @@ def _quaternions(rotations: np.ndarray) -> np.ndarray:
 
 
 def joint_poses(rigs: Sequence[Rig], roots: np.ndarray, angles: Sequence[Mapping[str, float]]) -> tuple[np.ndarray, np.ndarray]:
-    """World bone positions (rigs, bones, 3) and wxyz quaternions for rigs of one skeleton layout standing at roots (rigs, 4, 4), each bone turned from its neutral stance by its wire joint angles, a rig with soles lowered or raised until its lowest sole point is at its root's height."""
+    """World bone positions (rigs, bones, 3) and wxyz quaternions for rigs of one skeleton layout standing at roots (rigs, 4, 4), each bone turned from its neutral stance by its wire joint angles, a rig with soles moved along its root's up axis until its lowest sole point is level with the root."""
     joints, turned, axes, gains = _turns(rigs[0].bones)
     values = np.array([[pose.get(joint, 0.0) for joint in joints] for pose in angles]).reshape(len(rigs), len(joints)) * gains
     turns = _axis_rotations(axes, values)
@@ -530,8 +530,9 @@ def joint_poses(rigs: Sequence[Rig], roots: np.ndarray, angles: Sequence[Mapping
     for index, rig in enumerate(rigs):
         if len(rig.sole_bones):
             bones = rig.sole_bones
-            heights = np.einsum('kj,kj->k', rotations[index, bones, 2], rig.sole_points - rig.bind_positions[bones]) + positions[index, bones, 2]
-            positions[index, :, 2] += roots[index, 2, 3] - heights.min()
+            up = roots[index, :3, 2]
+            soles = np.einsum('kij,kj->ki', rotations[index, bones], rig.sole_points - rig.bind_positions[bones]) + positions[index, bones]
+            positions[index] -= ((soles - roots[index, :3, 3]) @ up).min() * up
     return positions, _quaternions(rotations)
 
 
