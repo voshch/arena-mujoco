@@ -10,7 +10,7 @@ from geometry_msgs.msg import Point, Pose, Vector3
 
 from arena_mujoco import context
 from arena_mujoco.scene import SceneStore
-from arena_mujoco.services.Articulated import _drive_articulated_cb, _spawn_articulated_cb, forget_articulated
+from arena_mujoco.services.Articulated import _drive_articulated_cb, _spawn_articulated_cb, bounce_damping, forget_articulated
 from arena_mujoco.services.SpawnPrims import _add_prim
 
 NAME = 'env_0/Obstacles/cabinet'
@@ -184,3 +184,46 @@ def test_a_sprung_door_swings_back_to_its_rest_and_its_surfaces_take_the_link_ma
     assert {round(float(model.geom_friction[geom][0]), 6) for geom in range(model.ngeom) if model.geom_bodyid[geom] == carcass} == {1.0}
     _run(store, 3.0)
     assert _drive(0.0, False) == pytest.approx([0.3], abs=0.05)
+
+
+def _rebound(store: SceneStore, tmp_path: Path, restitution: float) -> float:
+    """Rebound height of a ball dropped 1 m onto the top of a cabinet of this restitution."""
+    request = _cabinet(tmp_path)
+    request.links[0].has_material, request.links[0].static_friction, request.links[0].dynamic_friction, request.links[0].restitution = True, 0.5, 0.5, restitution
+    assert _spawn_articulated_cb(request, SpawnArticulated.Response()).ret
+
+    def ball(spec: mujoco.MjSpec) -> mujoco.MjsBody:
+        body = spec.worldbody.add_body()
+        body.name = 'ball'
+        body.pos = [0.0, 0.0, 2.1]
+        body.add_freejoint()
+        geom = body.add_geom()
+        geom.type = mujoco.mjtGeom.mjGEOM_SPHERE
+        geom.size = [0.1, 0.0, 0.0]
+        geom.mass = 0.5
+        return body
+
+    store.add_body(0, ball)
+    store.recompile(0)
+    model = store.get_model(0)
+    address = model.jnt_qposadr[model.body('ball').jntadr[0]] + 2
+    heights = []
+    for _ in range(int(2.0 * STEPS_PER_SECOND)):
+        store.step(1)
+        heights.append(float(store.get_data(0).qpos[address]))
+    lowest = heights.index(min(heights))
+    return max(heights[lowest:]) - 1.1
+
+
+@pytest.mark.parametrize('restitution', [0.9, 0.8, 0.5, 0.2])
+def test_a_link_material_rebounds_a_dropped_ball_at_its_restitution(store: SceneStore, tmp_path: Path, restitution: float):
+    assert math.sqrt(_rebound(store, tmp_path, restitution)) == pytest.approx(restitution, abs=0.04)
+
+
+def test_a_link_material_without_restitution_keeps_the_contact_dead(store: SceneStore, tmp_path: Path):
+    assert _rebound(store, tmp_path, 0.0) < 0.01
+
+
+def test_bounce_damping_falls_with_restitution_and_stops_at_critical():
+    assert bounce_damping(0.01) == pytest.approx(1.0, abs=1e-6)
+    assert 1.0 > bounce_damping(0.2) > bounce_damping(0.8) > bounce_damping(1.0) > 0.0

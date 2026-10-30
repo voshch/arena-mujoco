@@ -21,6 +21,10 @@ SEPARATOR = '__'
 DRIVE_SUFFIX = '__drive'
 WORLD_BODY = 'world'
 MIN_MASS = 1e-3
+BOUNCE_FREQUENCY = 160.0
+BOUNCE_SOLMIX = 1e3
+BOUNCE_BISECTIONS = 30
+MAX_RESTITUTION = 0.99
 
 
 @dataclass
@@ -42,6 +46,18 @@ class _Object:
 
 
 _objects: dict[tuple[int, str], _Object] = {}
+
+
+def bounce_damping(restitution: float) -> float:
+    """Damping ratio, critical at most, of a push-only spring-damper contact that rebounds at this restitution."""
+    low, high = 0.0, 1.0
+    for _ in range(BOUNCE_BISECTIONS):
+        ratio = (low + high) / 2.0
+        if math.exp(-2.0 * ratio * math.acos(ratio) / math.sqrt(1.0 - ratio * ratio)) > min(restitution, MAX_RESTITUTION):
+            low = ratio
+        else:
+            high = ratio
+    return high
 
 
 def _prm(*values: float) -> list[float]:
@@ -67,6 +83,10 @@ def _add_link(spec: mujoco.MjSpec, cache: AssetCache, root: str, parent: mujoco.
     if link.has_material:
         for geom in body.geoms:
             geom.friction = [link.dynamic_friction, geom.friction[1], geom.friction[2]]
+            if link.restitution > 0.0:
+                ratio = bounce_damping(link.restitution)
+                geom.solref = [1.0 / (BOUNCE_FREQUENCY * ratio), ratio]
+                geom.solmix = BOUNCE_SOLMIX
     obj.bodies.append(body.name)
     if not link.parent or link.type == ArticulatedLink.FIXED:
         return body
