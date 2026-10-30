@@ -411,6 +411,13 @@ class SceneStore:
             return None
         return scene.model
 
+    def get_spec(self, env_id: int) -> mujoco.MjSpec | None:
+        """Return the spec env_id compiles from, None if absent."""
+        scene = self._envs.get(env_id)
+        if scene is None:
+            return None
+        return scene.spec
+
     def get_data(self, env_id: int) -> mujoco.MjData | None:
         """Return the live MjData for env_id, None if not compiled yet."""
         scene = self._envs.get(env_id)
@@ -602,7 +609,7 @@ def _carry_state(
     new_model: mujoco.MjModel,
     new_data: mujoco.MjData,
 ) -> None:
-    """Copy qpos/qvel by joint name for joints that survive the recompile."""
+    """Copy qpos/qvel by joint name and ctrl by actuator name for joints and actuators that survive the recompile."""
     for joint_id in range(new_model.njnt):
         name = mujoco.mj_id2name(new_model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
         if name is None:
@@ -611,6 +618,13 @@ def _carry_state(
         if old_id < 0:
             continue
         _copy_joint(old_model, old_data, old_id, new_model, new_data, joint_id)
+    for actuator_id in range(new_model.nu):
+        name = mujoco.mj_id2name(new_model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_id)
+        if name is None:
+            continue
+        old_id = mujoco.mj_name2id(old_model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        if old_id >= 0:
+            new_data.ctrl[actuator_id] = old_data.ctrl[old_id]
     new_data.time = old_data.time
 
 

@@ -26,6 +26,7 @@ from arena_mujoco import context, hooks  # noqa: E402
 from arena_mujoco.lights import lighting  # noqa: E402
 from arena_mujoco.scene import PHYSICS_DT, SceneStore  # noqa: E402
 from arena_mujoco.services import services  # noqa: E402
+from arena_mujoco.services.Articulated import forget_articulated  # noqa: E402
 from arena_mujoco.services.SpawnCeilings import CEILING_GROUP  # noqa: E402
 from arena_mujoco.services.SpawnPedestrians import release_pedestrians, reset_env, update_pedestrians  # noqa: E402
 from arena_mujoco.services.SpawnUrdf import forget_robots  # noqa: E402
@@ -160,6 +161,7 @@ class MujocoController(rclpy.node.Node):
         env_id = int(request.env_id)
         self._scene_store.ensure_env(env_id)
         forget_robots(env_id, '')
+        forget_articulated(env_id, '/')
         self._scene_store.remove_by_prefix(env_id, '')
         reset_env(env_id)
         lighting(env_id).clear()
@@ -177,6 +179,7 @@ class MujocoController(rclpy.node.Node):
         ret: list[bool] = []
         for name in request.names:
             forget_robots(env_id, name)
+            forget_articulated(env_id, name)
             if name.rstrip('/') == f'env_{env_id}':
                 lighting(env_id).clear()
             if name.endswith('/'):

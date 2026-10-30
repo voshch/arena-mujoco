@@ -85,6 +85,8 @@ All services are on the global `/mujoco/` namespace. `env_id` selects the target
 | `mujoco/SpawnUrdf` | `arena_mujoco_msgs/SpawnUrdf` | Load URDF, attach into env spec, fire hooks |
 | `mujoco/SpawnPrims` | `arena_mujoco_msgs/SpawnPrims` | Spawn box or mesh obstacles |
 | `mujoco/EditPrims` | `arena_mujoco_msgs/EditPrims` | Update pose, scale and velocity of existing prims |
+| `mujoco/SpawnArticulated` | `arena_mujoco_msgs/SpawnArticulated` | Spawn an articulated object as one body tree: root fixed at the pose, each link a body on a damped hinge or slide joint with friction, armature and an optional spring, explicit inertia, its meshes and convex pieces like a prim at its material's friction and, with a restitution, a contact `solref` of that bounce (`bounce_damping`: the damping ratio of a push-only contact at 160 rad/s, weighted over the other geom's contact by `solmix`), a position actuator per joint with its gains off, contacts excluded within the object and with the world body |
+| `mujoco/DriveArticulated` | `arena_mujoco_msgs/DriveArticulated` | Per object, set placed joints onto their reference at rest, switch each drive on toward its reference or off (gains written to the compiled model and the spec, so a recompile keeps them), return every joint's `qpos` |
 | `mujoco/SpawnWalls` | `arena_mujoco_msgs/SpawnWalls` | Spawn oriented box walls from start/end points |
 | `mujoco/SpawnFloors` | `arena_mujoco_msgs/SpawnFloors` | Spawn flat floor slabs |
 | `mujoco/SpawnCeilings` | `arena_mujoco_msgs/SpawnCeilings` | Spawn flat ceiling slabs (2 cm thick) |
