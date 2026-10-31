@@ -54,13 +54,6 @@ def _textured_glb(tmp_path: Path) -> str:
     return str(path)
 
 
-@pytest.fixture
-def store() -> SceneStore:
-    store = SceneStore()
-    store.ensure_env(0)
-    return store
-
-
 def test_converted_mesh_has_one_part_per_material(tmp_path: Path):
     parts = mesh_parts(_two_material_glb(tmp_path))
     assert sorted(part.rgba for part in parts) == [pytest.approx(_GREEN, abs=0.01), pytest.approx(_RED, abs=0.01)]

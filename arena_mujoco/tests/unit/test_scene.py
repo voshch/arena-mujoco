@@ -16,13 +16,6 @@ def _box(name: str, pos: tuple[float, float, float], free: bool = False):
     return build
 
 
-@pytest.fixture
-def store() -> SceneStore:
-    store = SceneStore()
-    store.ensure_env(0)
-    return store
-
-
 def test_wire_names_resolve_after_sanitizing(store: SceneStore):
     name = store.add_body(0, _box('env_0/Obstacles/box-1', (1.0, 0.0, 0.1)))
     store.recompile(0)
