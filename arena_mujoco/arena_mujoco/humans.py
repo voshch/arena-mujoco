@@ -1,10 +1,9 @@
-"""Pedestrian visuals: an actor's skinned COLLADA mesh as MuJoCo skins on bones posed from its clips."""
+"""Pedestrian visuals: an actor's skinned COLLADA mesh as MuJoCo skins on bones posed from its clips or the body rig."""
 
 from __future__ import annotations
 
-import functools
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,11 +11,12 @@ import mujoco
 import numpy as np
 from PIL import Image
 
-from arena_mujoco.bone_map import BONE_MAP
+from arena_assets.rig import Rig as BodyRig
+from arena_assets.rig import rig_of
 from arena_mujoco.mesh_mat import MeshPart, cache_entry, part_material
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     import collada
 
@@ -25,8 +25,6 @@ if TYPE_CHECKING:
 _TEXTURE_PX = 512
 _MIN_OPAQUE = 0.25
 _RIG_FILE = 'rig.npz'
-_BIND_STANCE = frozenset(f'{side}{bone}' for side in ('Left', 'Right') for bone in ('UpLeg', 'Leg', 'Foot', 'ToeBase'))
-_WHEELS = frozenset(('WheelL', 'WheelR'))
 _SOLE_BAND = 0.01  # m above a foot's lowest bind vertex that still counts as sole
 
 
@@ -121,8 +119,38 @@ class SkinPart:
 
 
 @dataclass(frozen=True)
+class Joint:
+    """An Arena body joint and the skeleton nodes it turns, each with the share of its rotation and the bone's offset."""
+
+    name: str
+    parent: str | None
+    nodes: tuple[int, ...]
+    shares: tuple[float, ...]
+    offsets: tuple[np.ndarray, ...]
+    stance: np.ndarray
+
+
+@dataclass(frozen=True)
+class Driver:
+    """A driven joint of the bundle: its node turns about a node-local axis by the joint_state angle."""
+
+    name: str
+    node: int
+    axis: np.ndarray
+
+
+@dataclass(frozen=True)
+class Wire:
+    """Parent-relative joint rotation matrices, root offset in m and driven joint angles of one pedestrian."""
+
+    rotations: dict[str, np.ndarray] = field(default_factory=dict)
+    offset: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    angles: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Rig:
-    """An actor ready for MuJoCo: bone names, one skin part per material, its clips and its skeleton in the neutral stance."""
+    """An actor ready for MuJoCo: bone names, one skin part per material, its clips, its skeleton in the neutral stance and the joints that pose it."""
 
     bones: tuple[str, ...]
     parts: tuple[SkinPart, ...]
@@ -136,6 +164,8 @@ class Rig:
     scale: float
     sole_bones: np.ndarray
     sole_points: np.ndarray
+    joints: tuple[Joint, ...] | None
+    drivers: tuple[Driver, ...]
 
     @property
     def layout(self) -> tuple[tuple[str, ...], tuple[int, ...], tuple[int, ...]]:
@@ -236,38 +266,6 @@ def _continuous(quaternions: np.ndarray) -> np.ndarray:
     return np.concatenate([quaternions[:1], quaternions[1:] * signs[..., None]])
 
 
-def _swing(direction: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """Shortest rotation turning direction onto target."""
-    a = direction / np.linalg.norm(direction)
-    b = target / np.linalg.norm(target)
-    axis = np.cross(a, b)
-    sin = float(np.linalg.norm(axis))
-    if sin < 1e-12:
-        return np.eye(3)
-    x, y, z = axis / sin
-    cross = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
-    return np.eye(3) + sin * cross + (1.0 - float(a @ b)) * (cross @ cross)
-
-
-def _hang_legs(skeleton: Sequence[_Node], neutral: np.ndarray) -> np.ndarray:
-    """Local transforms (nodes, 4, 4) with each UpLeg and Leg swung to point straight down and each Foot keeping its world orientation."""
-    parents = [node.parent for node in skeleton]
-    index = {node.joint: i for i, node in enumerate(skeleton) if node.joint is not None}
-    hung = neutral.copy()
-    for side in ('Left', 'Right'):
-        names = [f'{side}{bone}' for bone in ('UpLeg', 'Leg', 'Foot')]
-        if not all(name in index for name in names):
-            continue
-        upleg, leg, foot = (index[name] for name in names)
-        foot_world = _worlds(parents, hung[:, None])[foot, 0, :3, :3]
-        for bone, child in ((upleg, leg), (leg, foot)):
-            worlds = _worlds(parents, hung[:, None])[:, 0]
-            turned = _swing(worlds[child, :3, 3] - worlds[bone, :3, 3], np.array([0.0, 0.0, -1.0])) @ worlds[bone, :3, :3]
-            hung[bone, :3, :3] = worlds[parents[bone], :3, :3].T @ turned
-        hung[foot, :3, :3] = _worlds(parents, hung[:, None])[parents[foot], 0, :3, :3].T @ foot_world
-    return hung
-
-
 def _diffuse(material: collada.material.Material, mesh_dir: Path) -> tuple[tuple[float, float, float, float] | None, Image.Image | None]:
     """Diffuse color or image of a COLLADA material, both None for an image that is mostly transparent."""
     import collada
@@ -311,13 +309,13 @@ def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
         arrays[f'clip_{name}_positions'] = joints[..., :3, 3]
         arrays[f'clip_{name}_quaternions'] = _continuous(quaternions)
         arrays[f'clip_{name}_stride'] = np.array(_stride(skeleton, worlds, advance))
-    _, stance = clips.get('idle') or next(iter(clips.values()))
+    _, stance = clips.get('neutral') or clips.get('idle') or next(iter(clips.values()))
     roots = {node.joint for node in skeleton if node.root}
     arrays['node_parents'] = np.array(parents)
-    neutral = _locals(skeleton, {joint: matrices[:1] for joint, matrices in stance.items() if joint not in roots | _BIND_STANCE}, 1)[0][:, 0]
+    neutral = _locals(skeleton, {joint: matrices[:1] for joint, matrices in stance.items() if joint not in roots}, 1)[0][:, 0]
     jointed = [index for index, node in enumerate(skeleton) if node.joint is not None]
     neutral[jointed, :3, :3] = _orthonormal(neutral[jointed, :3, :3])
-    arrays['neutral'] = _hang_legs(skeleton, neutral)
+    arrays['neutral'] = neutral
     arrays['bone_nodes'] = bone_nodes
     arrays['inverse_binds'] = inverse_binds
     arrays['bind_positions'] = np.linalg.inv(inverse_binds)[:, :3, 3] * scale
@@ -368,9 +366,17 @@ def _write_rig(out_dir: Path, stem: str, actor: Actor) -> None:
     np.savez(out_dir / _RIG_FILE, **arrays)  # pyright: ignore[reportArgumentType]
 
 
-def _soles(bones: tuple[str, ...], parts: Sequence[SkinPart], bind_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Bones and bind-space points of each foot's heel and toe sole vertex, none for a rig on wheels."""
-    if _WHEELS & set(bones):
+def _sole_pairs(rig: BodyRig | None) -> tuple[tuple[str, str], ...]:
+    """Foot and toe bone names of each side from the .rig soles, none for a rig with a distance driver."""
+    if rig is None or any(driver.settings.get('from') == 'distance' for driver in rig.drivers):
+        return ()
+    soles = rig.sole_names
+    return tuple((rig.bones_of(foot)[-1][0], rig.bones_of(toe)[-1][0]) for foot, toe in zip(soles[::2], soles[1::2], strict=False) if rig.bones_of(foot) and rig.bones_of(toe))
+
+
+def _soles(bones: tuple[str, ...], parts: Sequence[SkinPart], bind_positions: np.ndarray, pairs: Sequence[tuple[str, str]]) -> tuple[np.ndarray, np.ndarray]:
+    """Bones and bind-space points of each foot's heel and toe sole vertex for the foot and toe bone pairs."""
+    if not pairs:
         return np.zeros(0, dtype=int), np.zeros((0, 3))
     owner_lists: list[np.ndarray] = []
     for part in parts:
@@ -385,10 +391,10 @@ def _soles(bones: tuple[str, ...], parts: Sequence[SkinPart], bind_positions: np
     owners = np.concatenate(owner_lists) if parts else np.zeros(0, dtype=int)
     sole_bones: list[int] = []
     sole_points: list[np.ndarray] = []
-    for side in ('Left', 'Right'):
-        if f'{side}Foot' not in bones or f'{side}ToeBase' not in bones:
+    for foot_bone, toe_bone in pairs:
+        if foot_bone not in bones or toe_bone not in bones:
             continue
-        foot, toe = bones.index(f'{side}Foot'), bones.index(f'{side}ToeBase')
+        foot, toe = bones.index(foot_bone), bones.index(toe_bone)
         on_foot = np.flatnonzero((owners == foot) | (owners == toe))
         if not len(on_foot):
             continue
@@ -404,7 +410,53 @@ def _soles(bones: tuple[str, ...], parts: Sequence[SkinPart], bind_positions: np
     return np.array(sole_bones, dtype=int), np.array(sole_points).reshape(-1, 3)
 
 
-def _read_rig(out_dir: Path, z_offset: float) -> Rig:
+def quaternion_matrix(xyzw: Sequence[float]) -> np.ndarray:
+    """Rotation matrix of an x y z w quaternion, identity for an unset one."""
+    x, y, z, w = np.asarray(xyzw, dtype=np.float64)
+    norm = float(np.sqrt(x * x + y * y + z * z + w * w))
+    if norm == 0.0:
+        return np.eye(3)
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ]
+    )
+
+
+def _body_joints(rig: BodyRig | None, bones: tuple[str, ...], bone_nodes: Sequence[int]) -> tuple[Joint, ...] | None:
+    """Joints of a .rig parent first with their skeleton nodes, None for a bundle that maps none."""
+    if rig is None or not rig.joints:
+        return None
+    parents = rig.parent_names
+    held = {name: quaternion_matrix(stance.tolist()) for name, stance in zip(rig.joints, rig.stance, strict=True)}
+    joints = []
+    for name in rig.joints:
+        items = rig.bones_of(name)
+        parent = parents[name]
+        shares = np.cumsum([weight for _, weight, _ in items])
+        kept = [(bones.index(bone), float(share), offset) for (bone, _, offset), share in zip(items, shares, strict=True) if bone in bones]
+        joints.append(
+            Joint(
+                name=name,
+                parent=parent,
+                nodes=tuple(bone_nodes[bone] for bone, _, _ in kept),
+                shares=tuple(share for _, share, _ in kept),
+                offsets=tuple(quaternion_matrix(offset.tolist()) for _, _, offset in kept),
+                stance=held[parent].T @ held[name] if parent is not None else held[name],
+            )
+        )
+    return tuple(joints)
+
+
+def _drivers(rig: BodyRig | None, bones: tuple[str, ...], bone_nodes: Sequence[int]) -> tuple[Driver, ...]:
+    """Driven joints of a .rig whose bone the skin carries."""
+    return tuple(Driver(name=driver.name, node=bone_nodes[bones.index(driver.bone)], axis=driver.axis / np.linalg.norm(driver.axis)) for driver in (rig.drivers if rig is not None else ()) if driver.bone in bones)
+
+
+def _read_rig(out_dir: Path, z_offset: float, body_rig: BodyRig | None) -> Rig:
     with np.load(out_dir / _RIG_FILE) as arrays:
         bones = tuple(str(name) for name in arrays['bones'])
         parts = []
@@ -436,7 +488,8 @@ def _read_rig(out_dir: Path, z_offset: float) -> Rig:
             )
             for name in arrays['clips']
         }
-        sole_bones, sole_points = _soles(bones, parts, arrays['bind_positions'])
+        sole_bones, sole_points = _soles(bones, parts, arrays['bind_positions'], _sole_pairs(body_rig))
+        bone_nodes = arrays['bone_nodes'].tolist()
         return Rig(
             bones=bones,
             parts=tuple(parts),
@@ -444,12 +497,14 @@ def _read_rig(out_dir: Path, z_offset: float) -> Rig:
             z_offset=z_offset,
             node_parents=tuple(arrays['node_parents'].tolist()),
             neutral=arrays['neutral'],
-            bone_nodes=tuple(arrays['bone_nodes'].tolist()),
+            bone_nodes=tuple(bone_nodes),
             inverse_binds=arrays['inverse_binds'],
             bind_positions=arrays['bind_positions'],
             scale=float(arrays['scale']),
             sole_bones=sole_bones,
             sole_points=sole_points,
+            joints=_body_joints(body_rig, bones, bone_nodes),
+            drivers=_drivers(body_rig, bones, bone_nodes),
         )
 
 
@@ -462,22 +517,9 @@ def actor_rig(sdf_path: str) -> Rig:
     if rig is None:
         actor = read_actor(sdf_path)
         sources = [actor.skin, *(actor.clips[name] for name in sorted(actor.clips))]
-        out_dir = cache_entry(sources, f'bones at joints, legs hanging:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
-        rig = _rigs[sdf_path] = _read_rig(out_dir, actor.z_offset)
+        out_dir = cache_entry(sources, f'bones at joints, neutral stance from the clip:{_TEXTURE_PX}', _RIG_FILE, lambda stage, stem: _write_rig(stage, stem, actor))
+        rig = _rigs[sdf_path] = _read_rig(out_dir, actor.z_offset, rig_of(sdf_path))
     return rig
-
-
-@functools.cache
-def _turns(bones: tuple[str, ...]) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, np.ndarray]:
-    """Per bone rotation the wire drives: joint name, bone index, unit axis and gain, in BONE_MAP order."""
-    rows = [(joint, bones.index(bone), axis, gain) for joint, targets in BONE_MAP.items() for bone, axis, gain in targets if bone in bones]
-    axes = np.array([axis for _, _, axis, _ in rows], dtype=np.float64).reshape(-1, 3)
-    return (
-        tuple(joint for joint, _, _, _ in rows),
-        np.array([bone for _, bone, _, _ in rows], dtype=int),
-        axes / np.linalg.norm(axes, axis=1, keepdims=True),
-        np.array([gain for _, _, _, gain in rows]),
-    )
 
 
 def _axis_rotations(axes: np.ndarray, angles: np.ndarray) -> np.ndarray:
@@ -512,15 +554,61 @@ def _quaternions(rotations: np.ndarray) -> np.ndarray:
     return quaternions / np.linalg.norm(quaternions, axis=-1, keepdims=True)
 
 
-def joint_poses(rigs: Sequence[Rig], roots: np.ndarray, angles: Sequence[Mapping[str, float]]) -> tuple[np.ndarray, np.ndarray]:
-    """World bone positions (rigs, bones, 3) and wxyz quaternions for rigs of one skeleton layout standing at roots (rigs, 4, 4), each bone turned from its neutral stance by its wire joint angles, a rig with soles moved along its root's up axis until its lowest sole point is level with the root."""
-    joints, turned, axes, gains = _turns(rigs[0].bones)
-    values = np.array([[pose.get(joint, 0.0) for joint in joints] for pose in angles]).reshape(len(rigs), len(joints)) * gains
-    turns = _axis_rotations(axes, values)
-    transforms = np.stack([rig.neutral for rig in rigs], axis=1)
+def _turn(axis: np.ndarray, angle: float) -> np.ndarray:
+    """Rotation matrix about a unit axis."""
+    return _axis_rotations(axis[None], np.array([[angle]]))[0, 0]
+
+
+def _power(rotation: np.ndarray, exponent: float) -> np.ndarray:
+    """The rotation about the same axis by exponent times the angle."""
+    w, *vector = _quaternions(rotation)
+    xyz = np.array(vector)
+    if w < 0.0:
+        w, xyz = -w, -xyz
+    sin = float(np.linalg.norm(xyz))
+    if sin < 1e-12:
+        return np.eye(3)
+    return _turn(xyz / sin, exponent * 2.0 * float(np.arctan2(sin, w)))
+
+
+def _posed(rig: Rig, wire: Wire) -> np.ndarray:
+    """Local node transforms (nodes, 4, 4) with the wire's joints and driven angles applied to the neutral stance."""
+    transforms = rig.neutral.copy()
+    worlds: dict[str | None, np.ndarray] = {None: np.eye(3)}
+    bone_worlds: dict[int, np.ndarray] = {}
+    for joint in rig.joints or ():
+        local = wire.rotations.get(joint.name, joint.stance)
+        above = worlds.get(joint.parent, np.eye(3))
+        worlds[joint.name] = above @ local
+        for node, share, offset in zip(joint.nodes, joint.shares, joint.offsets, strict=True):
+            bone_worlds[node] = above @ (local if share > 1.0 - 1e-9 else _power(local, share)) @ offset
+    top = next((joint.nodes[0] for joint in rig.joints or () if joint.nodes), -1)
+    turns: dict[int, np.ndarray] = {}
+    for driver in rig.drivers:
+        turns[driver.node] = turns.get(driver.node, np.eye(3)) @ _turn(driver.axis, wire.angles.get(driver.name, 0.0))
+    units: list[np.ndarray] = []
+    scales: list[float] = []
+    for node, parent in enumerate(rig.node_parents):
+        above = units[parent] if parent >= 0 else np.eye(3)
+        linear = transforms[node, :3, :3]
+        scale = float(np.cbrt(np.linalg.det(linear)))
+        if node in bone_worlds:
+            transforms[node, :3, :3] = above.T @ bone_worlds[node] * scale
+            if node == top:
+                transforms[node, :3, 3] += above.T @ wire.offset / (scales[parent] if parent >= 0 else 1.0)
+            units.append(bone_worlds[node])
+        else:
+            if node in turns:
+                transforms[node, :3, :3] = linear @ turns[node]
+            units.append(above @ transforms[node, :3, :3] / scale)
+        scales.append((scales[parent] if parent >= 0 else 1.0) * scale)
+    return transforms
+
+
+def joint_poses(rigs: Sequence[Rig], roots: np.ndarray, wires: Sequence[Wire]) -> tuple[np.ndarray, np.ndarray]:
+    """World bone positions (rigs, bones, 3) and wxyz quaternions for rigs of one skeleton layout standing at roots (rigs, 4, 4) and posed by their wires, a rig with soles moved along its root's up axis until its lowest sole point is level with the root."""
+    transforms = np.stack([_posed(rig, wire) for rig, wire in zip(rigs, wires, strict=True)], axis=1)
     nodes = list(rigs[0].bone_nodes)
-    for index, bone in enumerate(turned):
-        transforms[nodes[bone], :, :3, :3] = transforms[nodes[bone], :, :3, :3] @ turns[:, index]
     worlds = _worlds(rigs[0].node_parents, transforms, roots)
     joints = np.moveaxis(worlds[nodes], 0, 1)
     skinned = joints @ np.stack([rig.inverse_binds for rig in rigs])
@@ -556,4 +644,4 @@ def add_skin(spec: mujoco.MjSpec, cache: AssetCache, name: str, rig: Rig, part: 
     return skin
 
 
-__all__ = ['Actor', 'Clip', 'Rig', 'SkinPart', 'actor_rig', 'add_skin', 'clip_frames', 'joint_poses', 'read_actor']
+__all__ = ['Actor', 'Clip', 'Driver', 'Joint', 'Rig', 'SkinPart', 'Wire', 'actor_rig', 'add_skin', 'clip_frames', 'joint_poses', 'quaternion_matrix', 'read_actor']

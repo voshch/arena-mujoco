@@ -1,5 +1,7 @@
 import dataclasses
-import importlib.util
+import importlib
+import logging
+import math
 import sys
 from pathlib import Path
 
@@ -8,10 +10,13 @@ import numpy as np
 import pytest
 from arena_people_msgs.msg import Pedestrian, SpawnPedestrian
 from arena_people_msgs.srv import SpawnPedestrians
+from arena_assets.rig import Rig as BodyRig
+from arena_assets.rig import write_rig
+from arena_simulation_setup.testing import make_rig
+from geometry_msgs.msg import Quaternion
 
 from arena_mujoco import context
-from arena_mujoco.bone_map import BONE_MAP
-from arena_mujoco.humans import Rig, SkinPart, _quaternions, _soles, actor_rig, clip_frames, joint_poses, read_actor
+from arena_mujoco.humans import Rig, SkinPart, Wire, _quaternions, _sole_pairs, _soles, actor_rig, clip_frames, joint_poses, quaternion_matrix, read_actor
 from arena_mujoco.scene import SceneStore
 from arena_mujoco.sensors.laser import cast_rays
 from arena_mujoco.services.SpawnPedestrians import reset_env, spawn_pedestrians_service, update_pedestrians
@@ -69,6 +74,10 @@ def _channel(joint: str, *matrices: str) -> str:
 _IDLE = f'{_HEAD}<library_animations>{_channel("Hips", _HIPS_MOVED)}{_channel("LeftLeg", _KNEE_BENT)}</library_animations></COLLADA>'
 _WALK = f'{_HEAD}<library_animations>{_channel("Hips", _HIPS_MOVED, _HIPS_STEP, _HIPS_ARRIVED)}{_channel("LeftLeg", _KNEE_REST, _KNEE_BENT, _KNEE_REST)}</library_animations></COLLADA>'
 
+_IDENTITY = (0.0, 0.0, 0.0, 1.0)
+_PELVIS = {'pelvis': (None, [('Hips', 1.0, _IDENTITY)])}
+_PELVIS_KNEE = {**_PELVIS, 'left_knee': ('pelvis', [('LeftLeg', 1.0, _IDENTITY)])}
+
 _STANDING = {(0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, 2.0), (0.1, 0.0, 1.0)}
 _KNEE_UP = {(0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 1.0), (0.0, 0.0, 0.9)}
 
@@ -80,6 +89,7 @@ def actor_sdf(tmp_path: Path) -> str:
     (tmp_path / 'meshes' / 'person.dae').write_text(_SKIN)
     (tmp_path / 'clips' / 'idle.dae').write_text(_IDLE)
     (tmp_path / 'clips' / 'walk.dae').write_text(_WALK)
+    write_rig(tmp_path / 'person.rig', make_rig(_PELVIS_KNEE))
     sdf = tmp_path / 'person.sdf'
     sdf.write_text('<sdf version="1.9"><actor name="person"><pose>0 0 -0.04 0 0 0</pose><skin><filename>meshes/person.dae</filename></skin><animation name="idle"><filename>clips/idle.dae</filename></animation><animation name="walk"><filename>clips/walk.dae</filename></animation></actor></sdf>')
     return str(sdf)
@@ -122,29 +132,113 @@ def test_rig_poses_the_skin_by_its_clips_with_the_root_advance_removed(actor_sdf
     assert _skinned(rig, *walk.pose(1.0)) == _STANDING
 
 
+def _ry(angle: float) -> np.ndarray:
+    return np.array([[math.cos(angle), 0.0, math.sin(angle)], [0.0, 1.0, 0.0], [-math.sin(angle), 0.0, math.cos(angle)]])
+
+
+def _rz(angle: float) -> np.ndarray:
+    return np.array([[math.cos(angle), -math.sin(angle), 0.0], [math.sin(angle), math.cos(angle), 0.0], [0.0, 0.0, 1.0]])
+
+
+def _stood(hips: np.ndarray, shin: np.ndarray) -> set[tuple[float, ...]]:
+    """The fixture's vertices with the Hips bone at world rotation hips and the LeftLeg bone at shin, which hangs from the hips by (0, 0, 1)."""
+    knee = hips @ (0.0, 0.0, 1.0)
+    points = [np.zeros(3), knee, shin @ (0.0, 0.0, 1.0) + knee, shin @ (0.1, 0.0, 0.0) + knee]
+    return {tuple((point + 0.0).round(4).tolist()) for point in points}
+
+
 def _knee_turned(angle: float) -> set[tuple[float, ...]]:
-    """The fixture's vertices with the LeftLeg bone turned by the wire's l_knee angle from its bind rest."""
-    ((_, axis, gain),) = BONE_MAP['l_knee']
-    quaternion = np.empty(4)
-    mujoco.mju_axisAngle2Quat(quaternion, np.array(axis) / np.linalg.norm(axis), gain * angle)
-    turn = np.empty(9)
-    mujoco.mju_quat2Mat(turn, quaternion)
-    rotation = turn.reshape(3, 3)
-    shin = np.array([[0.0, 0.0, 1.0], [0.1, 0.0, 0.0]]) @ rotation.T + (0.0, 0.0, 1.0)
-    return {(0.0, 0.0, 0.0), (0.0, 0.0, 1.0), *(tuple(vertex) for vertex in (shin + 0.0).round(4).tolist())}
+    """The fixture's vertices with the LeftLeg bone turned by the left_knee rotation from its bind rest."""
+    return _stood(np.eye(3), _ry(angle))
 
 
-def test_wire_joint_angles_turn_leg_bones_from_their_bind_rest(actor_sdf: str):
+def _knee_wire(angle: float) -> Wire:
+    return Wire(rotations={'left_knee': _ry(angle)})
+
+
+def _rigged(actor_sdf: str, rig: BodyRig) -> Rig:
+    write_rig(Path(actor_sdf).with_suffix('.rig'), rig)
+    return actor_rig(actor_sdf)
+
+
+def test_wire_joint_rotations_turn_leg_bones_from_their_bind_rest(actor_sdf: str):
     rig = actor_rig(actor_sdf)
     standing = np.eye(4)[None]
 
-    positions, quaternions = joint_poses([rig], standing, [{}])
+    positions, quaternions = joint_poses([rig], standing, [Wire()])
     assert _skinned(rig, positions[0], quaternions[0]) == _STANDING == _knee_turned(0.0)
 
-    positions, quaternions = joint_poses([rig, rig], np.concatenate([standing, standing]), [{'l_knee': -0.8, 'unknown': 1.0}, {'l_knee': 0.5}])
+    positions, quaternions = joint_poses([rig, rig], np.concatenate([standing, standing]), [Wire(rotations={**_knee_wire(-0.8).rotations, 'unknown': _ry(1.0)}), _knee_wire(0.5)])
     assert _skinned(rig, positions[0], quaternions[0]) == _knee_turned(-0.8)
     assert _skinned(rig, positions[1], quaternions[1]) == _knee_turned(0.5)
     assert _knee_turned(-0.8) != _STANDING
+
+
+def test_a_mapped_bone_takes_its_joints_world_rotation_times_the_offset_down_a_two_bone_chain(actor_sdf: str):
+    half = math.sqrt(0.5)
+    rig = _rigged(actor_sdf, make_rig({**_PELVIS, 'left_knee': ('pelvis', [('LeftLeg', 1.0, (0.0, 0.0, half, half))])}))
+    wire = Wire(rotations={'pelvis': _rz(0.3), 'left_knee': _ry(0.5)})
+    positions, quaternions = joint_poses([rig], np.eye(4)[None], [wire])
+    hips = _rz(0.3)
+    assert _skinned(rig, positions[0], quaternions[0]) == _stood(hips, hips @ _ry(0.5) @ _rz(math.pi / 2))
+
+
+def test_a_spread_joint_gives_each_bone_its_share_of_the_angle_and_the_last_the_whole(actor_sdf: str):
+    rig = _rigged(actor_sdf, make_rig({'pelvis': (None, [('Hips', 0.5, _IDENTITY), ('LeftLeg', 0.5, _IDENTITY)])}))
+    positions, quaternions = joint_poses([rig], np.eye(4)[None], [Wire(rotations={'pelvis': _ry(0.8)})])
+    assert _skinned(rig, positions[0], quaternions[0]) == _stood(_ry(0.4), _ry(0.8))
+
+
+def test_a_joint_missing_from_the_wire_keeps_its_stance(actor_sdf: str):
+    half = math.sqrt(0.5)
+    stance = {'pelvis': _IDENTITY, 'left_knee': (0.0, half, 0.0, half)}
+    rig = _rigged(actor_sdf, make_rig(_PELVIS_KNEE, stance))
+    wire = Wire(rotations={'pelvis': np.eye(3)})
+    held = joint_poses([rig], np.eye(4)[None], [wire])
+    posed = joint_poses([rig], np.eye(4)[None], [Wire(rotations={'pelvis': np.eye(3), 'left_knee': quaternion_matrix((0.0, half, 0.0, half))})])
+    assert held[1] == pytest.approx(posed[1])
+
+
+def test_a_two_joint_rig_with_no_human_names_poses_its_bones(actor_sdf: str):
+    half = math.sqrt(0.5)
+    rig = _rigged(actor_sdf, make_rig({'chassis': (None, [('Hips', 1.0, _IDENTITY)]), 'boom': ('chassis', [('LeftLeg', 1.0, _IDENTITY)])}))
+    still = joint_poses([rig], np.eye(4)[None], [Wire(rotations={'chassis': np.eye(3), 'boom': np.eye(3)})])
+    turned = joint_poses([rig], np.eye(4)[None], [Wire(rotations={'chassis': np.eye(3), 'boom': quaternion_matrix((0.0, half, 0.0, half))})])
+    index = rig.bones.index('LeftLeg')
+    assert not np.allclose(still[1][0, index], turned[1][0, index])
+    assert np.allclose(still[1][0, rig.bones.index('Hips')], turned[1][0, rig.bones.index('Hips')])
+
+
+def test_bones_the_rig_does_not_name_hold_their_neutral_stance_under_their_parent(actor_sdf: str):
+    rig = _rigged(actor_sdf, make_rig(_PELVIS))
+    positions, quaternions = joint_poses([rig], np.eye(4)[None], [Wire()])
+    assert _skinned(rig, positions[0], quaternions[0]) == _KNEE_UP
+    turn = _rz(math.pi / 2)
+    positions, quaternions = joint_poses([rig], np.eye(4)[None], [Wire(rotations={'pelvis': turn})])
+    assert _skinned(rig, positions[0], quaternions[0]) == _stood(turn, turn @ _ry(math.pi / 2))
+
+
+def test_the_root_offset_moves_the_top_bone_and_with_it_the_skeleton(actor_sdf: str):
+    rig = actor_rig(actor_sdf)
+    positions, quaternions = joint_poses([rig], np.eye(4)[None], [Wire(offset=np.array([0.2, 0.0, 0.3]))])
+    assert _skinned(rig, positions[0], quaternions[0]) == {(round(x + 0.2, 4), y, round(z + 0.3, 4)) for x, y, z in _STANDING}
+
+
+def test_a_driver_bone_turns_from_its_neutral_about_its_axis_by_the_joint_state_angle(actor_sdf: str):
+    rig = _rigged(actor_sdf, make_rig(_PELVIS, drivers={'shin_turn': {'bone': 'LeftLeg', 'from': 'angle', 'axis': [0.0, 2.0, 0.0]}}))
+    for angles, expected in (({}, _KNEE_UP), ({'shin_turn': 0.5}, _stood(np.eye(3), _ry(math.pi / 2 + 0.5)))):
+        positions, quaternions = joint_poses([rig], np.eye(4)[None], [Wire(angles=angles)])
+        assert _skinned(rig, positions[0], quaternions[0]) == expected
+
+
+def test_quaternion_matrix_matches_mujoco_for_any_rotation():
+    rng = np.random.default_rng(1)
+    for wxyz in rng.normal(size=(50, 4)):
+        wxyz /= np.linalg.norm(wxyz)
+        expected = np.empty(9)
+        mujoco.mju_quat2Mat(expected, wxyz)
+        assert quaternion_matrix(np.roll(wxyz, -1)) == pytest.approx(expected.reshape(3, 3))
+    assert quaternion_matrix((0.0, 0.0, 0.0, 0.0)) == pytest.approx(np.eye(3))
 
 
 _FEET = ('Hips', 'LeftFoot', 'LeftToeBase', 'RightFoot', 'RightToeBase')
@@ -174,14 +268,38 @@ def _shoe_part() -> SkinPart:
     )
 
 
+_FOOT_PAIRS = (('LeftFoot', 'LeftToeBase'), ('RightFoot', 'RightToeBase'))
+
+_FEET_JOINTS = {
+    'left_knee': (None, []),
+    'left_ankle': ('left_knee', [('LeftFoot', 1.0, _IDENTITY)]),
+    'left_foot': ('left_ankle', [('LeftToeBase', 1.0, _IDENTITY)]),
+    'right_knee': (None, []),
+    'right_ankle': ('right_knee', [('RightFoot', 1.0, _IDENTITY)]),
+    'right_foot': ('right_ankle', [('RightToeBase', 1.0, _IDENTITY)]),
+}
+_SOLE_JOINTS = ['left_ankle', 'left_foot', 'right_ankle', 'right_foot']
+
+
+def test_soles_are_found_through_the_joints_the_rig_names():
+    pairs = _sole_pairs(make_rig(_FEET_JOINTS, soles=_SOLE_JOINTS))
+    assert pairs == _FOOT_PAIRS
+    bones, _ = _soles(_FEET, [_shoe_part()], _FEET_BINDS, pairs)
+    assert bones.tolist() == [1, 2, 3, 4]
+    assert _sole_pairs(None) == _sole_pairs(make_rig(_PELVIS)) == ()
+
+
 def test_soles_take_the_lowest_rear_and_front_sole_vertex_of_each_foot():
-    bones, points = _soles(_FEET, [_shoe_part()], _FEET_BINDS)
+    bones, points = _soles(_FEET, [_shoe_part()], _FEET_BINDS, _FOOT_PAIRS)
     assert bones.tolist() == [1, 2, 3, 4]
     assert points.tolist() == [[-0.04, 0.1, 0.0], [0.18, 0.1, 0.002], [-0.04, -0.1, 0.0], [0.19, -0.1, 0.001]]
 
 
-def test_a_rig_on_wheels_has_no_soles():
-    bones, points = _soles((*_FEET, 'WheelL'), [_shoe_part()], np.vstack([_FEET_BINDS, np.zeros(3)]))
+def test_a_rig_with_a_distance_driver_has_no_soles():
+    wheel = {'l_wheel': {'bone': 'WheelL', 'from': 'distance', 'radius': 0.3, 'lateral': 0.288, 'axis': [0.0, 1.0, 0.0]}}
+    pairs = _sole_pairs(make_rig(_FEET_JOINTS, soles=_SOLE_JOINTS, drivers=wheel))
+    assert pairs == ()
+    bones, points = _soles((*_FEET, 'WheelL'), [_shoe_part()], np.vstack([_FEET_BINDS, np.zeros(3)]), pairs)
     assert len(bones) == 0 and points.shape == (0, 3)
 
 
@@ -189,13 +307,13 @@ def test_joint_poses_stand_the_lowest_sole_point_at_the_root_height(actor_sdf: s
     rig = dataclasses.replace(actor_rig(actor_sdf), sole_bones=np.array([1]), sole_points=np.array([[0.1, 0.0, 1.0]]))
     root = np.eye(4)[None]
     root[0, 2, 3] = 0.25
-    for angles in ({}, {'l_knee': -0.8}):
-        positions, quaternions = joint_poses([rig], root, [angles])
+    for wire in (Wire(), _knee_wire(-0.8)):
+        positions, quaternions = joint_poses([rig], root, [wire])
         rotation = np.empty(9)
         mujoco.mju_quat2Mat(rotation, quaternions[0, 1])
         sole = rotation.reshape(3, 3) @ (rig.sole_points[0] - rig.bind_positions[1]) + positions[0, 1]
         assert sole[2] == pytest.approx(0.25)
-        unplanted, _ = joint_poses([actor_rig(actor_sdf)], root, [angles])
+        unplanted, _ = joint_poses([actor_rig(actor_sdf)], root, [wire])
         assert positions[0, :, :2] == pytest.approx(unplanted[0, :, :2])
 
 
@@ -204,12 +322,12 @@ def test_joint_poses_plant_the_soles_along_a_tipped_root_up_axis(actor_sdf: str)
     root = np.eye(4)[None]
     root[0, :3, :3] = [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]
     root[0, :3, 3] = (1.0, 2.0, 0.6)
-    positions, quaternions = joint_poses([rig], root, [{}])
+    positions, quaternions = joint_poses([rig], root, [Wire()])
     rotation = np.empty(9)
     mujoco.mju_quat2Mat(rotation, quaternions[0, 1])
     sole = rotation.reshape(3, 3) @ (rig.sole_points[0] - rig.bind_positions[1]) + positions[0, 1]
     assert (sole - root[0, :3, 3]) @ root[0, :3, 2] == pytest.approx(0.0)
-    unplanted, _ = joint_poses([actor_rig(actor_sdf)], root, [{}])
+    unplanted, _ = joint_poses([actor_rig(actor_sdf)], root, [Wire()])
     assert positions[0, :, 1:] == pytest.approx(unplanted[0, :, 1:])
 
 
@@ -234,38 +352,76 @@ def isaac_peds():
     if not (_ISAAC / 'peds').is_dir():
         pytest.skip('arena_isaac is not checked out')
     sys.path.insert(0, str(_ISAAC))
-    yield importlib.import_module('peds.convert'), importlib.import_module('peds.providers.external'), importlib.import_module('peds.providers.bone_map')
-    sys.path.remove(str(_ISAAC))
+    try:
+        yield importlib.import_module('peds.convert'), importlib.import_module('peds.providers.external')
+    except ImportError as exc:
+        pytest.skip(f'arena_isaac peds not importable: {exc}')
+    finally:
+        sys.path.remove(str(_ISAAC))
 
 
-def test_bone_map_matches_the_isaac_table(isaac_peds):
-    _, _, bone_map = isaac_peds
-    isaac = {joint: tuple((target.bone, target.axis, target.sign * target.scale) for target in targets) for joint, targets in bone_map.BONE_MAP.items()}
-    assert isaac == BONE_MAP
+def _axis_quaternion(axis: int, angle: float) -> list[float]:
+    quaternion = [0.0, 0.0, 0.0, math.cos(angle / 2)]
+    quaternion[axis] = math.sin(angle / 2)
+    return quaternion
 
 
-def _quat_matrix(xyzw: np.ndarray) -> np.ndarray:
-    matrix = np.empty(9)
-    mujoco.mju_quat2Mat(matrix, np.roll(xyzw, 1))
-    return matrix.reshape(3, 3)
+_HALF = math.sqrt(0.5)
+
+_ISAAC_CASES = {
+    'knee': (make_rig(_PELVIS_KNEE), {'left_knee': _axis_quaternion(1, -0.7)}, (0.0, 0.0, 0.0), {}),
+    'chain': (
+        make_rig({**_PELVIS, 'left_knee': ('pelvis', [('LeftLeg', 1.0, (0.0, 0.0, _HALF, _HALF))])}),
+        {'pelvis': _axis_quaternion(2, 0.3), 'left_knee': _axis_quaternion(1, 0.5)},
+        (0.1, 0.0, 0.2),
+        {},
+    ),
+    'spread': (
+        make_rig({'pelvis': (None, [('Hips', 0.5, _IDENTITY), ('LeftLeg', 0.5, _IDENTITY)])}),
+        {'pelvis': _axis_quaternion(1, 0.8)},
+        (0.0, 0.0, 0.0),
+        {},
+    ),
+    'driver': (
+        make_rig(_PELVIS, drivers={'shin_turn': {'bone': 'LeftLeg', 'from': 'angle', 'axis': [0.0, 1.0, 0.0]}}),
+        {'pelvis': _axis_quaternion(2, 0.4)},
+        (0.0, 0.0, 0.0),
+        {'shin_turn': 0.5},
+    ),
+    'two_drivers_one_bone': (
+        make_rig(
+            _PELVIS,
+            drivers={
+                'shin_pitch': {'bone': 'LeftLeg', 'from': 'angle', 'axis': [0.0, 1.0, 0.0]},
+                'shin_roll': {'bone': 'LeftLeg', 'from': 'angle', 'axis': [1.0, 0.0, 0.0]},
+            },
+        ),
+        {'pelvis': _axis_quaternion(2, 0.4)},
+        (0.0, 0.0, 0.0),
+        {'shin_pitch': 0.5, 'shin_roll': -0.3},
+    ),
+}
 
 
-def test_wire_pose_matches_isaacs_converter_and_provider(actor_sdf: str, isaac_peds):
-    convert, external, _ = isaac_peds
+@pytest.mark.parametrize('case', list(_ISAAC_CASES))
+def test_body_pose_matches_isaacs_pose_provider(actor_sdf: str, isaac_peds, case: str):
+    convert, external = isaac_peds
+    body_rig, rotations, offset, angles = _ISAAC_CASES[case]
+    rig = _rigged(actor_sdf, body_rig)
+
     actor = read_actor(actor_sdf)
     document = convert._Collada(str(actor.skin))
     joints = convert._parse_skeleton(document)
     (skinned,) = convert._parse_skinned_meshes(document)
-    rotations, translations = convert._neutral_pose(joints, convert._parse_animations(convert._Collada(str(actor.clips['idle']))), convert._BIND_STANCE)
-    provider = external.ExternalPoseProvider(tuple(joint.path for joint in joints), np.array(rotations), np.array(translations))
-    angles = {'l_knee': -0.7}
-    provider.push(0.0, list(angles), list(angles.values()))
+    neutral, translations = convert._neutral_pose(joints, convert._parse_animations(convert._Collada(str(actor.clips['idle']))))
+    provider = external.ExternalPoseProvider(tuple(joint.path for joint in joints), np.array(neutral), np.array(translations), body_rig)
+    provider.push(0.0, list(rotations), list(rotations.values()), offset, list(angles), list(angles.values()))
     pose = provider.evaluate(0.0, 1.0)
 
     worlds: list[np.ndarray] = []
     for index, joint in enumerate(joints):
         local = np.eye(4)
-        local[:3, :3] = _quat_matrix(pose.rotations[index])
+        local[:3, :3] = quaternion_matrix(pose.rotations[index])
         local[:3, 3] = pose.translations[index]
         worlds.append(local if joint.parent < 0 else worlds[joint.parent] @ local)
     by_name = {joint.name: world for joint, world in zip(joints, worlds, strict=True)}
@@ -275,9 +431,9 @@ def test_wire_pose_matches_isaacs_converter_and_provider(actor_sdf: str, isaac_p
         posed = sum(weight * (by_name[skinned.skin.joint_names[joint]] @ skinned.skin.inv_bind[joint] @ point) for joint, weight in influences)
         isaac.add(tuple((posed[:3] + 0.0).round(4).tolist()))
 
-    rig = actor_rig(actor_sdf)
-    positions, quaternions = joint_poses([rig], np.eye(4)[None], [angles])
-    assert _skinned(rig, positions[0], quaternions[0]) == isaac == _knee_turned(-0.7)
+    wire = Wire(rotations={name: quaternion_matrix(quaternion) for name, quaternion in rotations.items()}, offset=np.array(offset), angles=angles)
+    positions, quaternions = joint_poses([rig], np.eye(4)[None], [wire])
+    assert _skinned(rig, positions[0], quaternions[0]) == isaac != _STANDING
 
 
 def _pedestrian(name: str, model_uri: str, x: float) -> Pedestrian:
@@ -354,21 +510,47 @@ def test_walking_pedestrian_plays_the_walk_clip_by_distance_and_stands_in_idle(s
     assert _skin_vertices(store, 7) == _shifted(_KNEE_UP, 5.0, -0.04)
 
 
-def test_pedestrian_with_joint_state_on_the_wire_follows_it_instead_of_a_clip(store: SceneStore, actor_sdf: str):
+def _with_body(pedestrian: Pedestrian, **rotations: tuple[float, float, float, float]) -> Pedestrian:
+    pedestrian.body.joints = list(rotations)
+    pedestrian.body.rotations = [Quaternion(x=x, y=y, z=z, w=w) for x, y, z, w in rotations.values()]
+    return pedestrian
+
+
+def _knee_quaternion(angle: float) -> tuple[float, float, float, float]:
+    return 0.0, math.sin(angle / 2), 0.0, math.cos(angle / 2)
+
+
+def test_pedestrian_with_a_body_pose_on_the_wire_follows_it_instead_of_a_clip(store: SceneStore, actor_sdf: str):
     _spawn('env_7/peds/doctor', actor_sdf, 3.0)
-    walking = _pedestrian('env_7/peds/doctor', actor_sdf, 4.0)
-    walking.joint_state.name = ['l_knee', 'r_knee']
-    walking.joint_state.position = [-0.8, -0.8]
+    walking = _with_body(_pedestrian('env_7/peds/doctor', actor_sdf, 4.0), left_knee=_knee_quaternion(-0.8))
     store.step(500)
     update_pedestrians([walking])
     assert _skin_vertices(store, 7) == _shifted(_knee_turned(-0.8), 4.0, -0.04)
 
-    turned = _pedestrian('env_7/peds/doctor', actor_sdf, 4.0)
+    turned = _with_body(_pedestrian('env_7/peds/doctor', actor_sdf, 4.0), left_knee=(0.0, 0.0, 0.0, 1.0))
     turned.pose.orientation.z = turned.pose.orientation.w = 0.5**0.5
-    turned.joint_state.name = ['l_knee']
-    turned.joint_state.position = [0.0]
     update_pedestrians([turned])
     assert _skin_vertices(store, 7) == {(round(4.0 - y, 4), round(x, 4), round(z - 0.04, 4)) for x, y, z in _STANDING}
+
+
+def test_a_missing_rig_plays_clips_and_is_logged_once_per_model(store: SceneStore, actor_sdf: str, caplog: pytest.LogCaptureFixture):
+    Path(actor_sdf).with_suffix('.rig').unlink()
+    with caplog.at_level(logging.WARNING):
+        assert actor_rig(actor_sdf).joints is None
+        _spawn('env_7/peds/doctor', actor_sdf, 3.0)
+        _spawn('env_7/peds/nurse', actor_sdf, 6.0)
+    assert caplog.text.count('rig_human') == 1
+
+    update_pedestrians([_with_body(_pedestrian('env_7/peds/doctor', actor_sdf, 3.0), left_knee=_knee_quaternion(-0.8))])
+    assert _skin_vertices(store, 7) == _shifted(_KNEE_UP, 3.0, -0.04) | _shifted(_KNEE_UP, 6.0, -0.04)
+
+
+def test_a_rig_without_joints_plays_its_clips(store: SceneStore, actor_sdf: str):
+    write_rig(Path(actor_sdf).with_suffix('.rig'), make_rig({}, settings={'root_offset': [0.0, 0.0, -0.3]}))
+    assert actor_rig(actor_sdf).joints is None
+    _spawn('env_7/peds/doctor', actor_sdf, 3.0)
+    update_pedestrians([_with_body(_pedestrian('env_7/peds/doctor', actor_sdf, 3.0), left_knee=_knee_quaternion(-0.8))])
+    assert _skin_vertices(store, 7) == _shifted(_KNEE_UP, 3.0, -0.04)
 
 
 def test_deleting_a_pedestrian_body_takes_its_bones_and_skins_along(store: SceneStore, actor_sdf: str):
