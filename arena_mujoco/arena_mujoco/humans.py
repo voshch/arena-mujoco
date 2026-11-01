@@ -583,7 +583,9 @@ def _posed(rig: Rig, wire: Wire) -> np.ndarray:
         for node, share, offset in zip(joint.nodes, joint.shares, joint.offsets, strict=True):
             bone_worlds[node] = above @ (local if share > 1.0 - 1e-9 else _power(local, share)) @ offset
     top = next((joint.nodes[0] for joint in rig.joints or () if joint.nodes), -1)
-    turns = {driver.node: _turn(driver.axis, wire.angles.get(driver.name, 0.0)) for driver in rig.drivers}
+    turns: dict[int, np.ndarray] = {}
+    for driver in rig.drivers:
+        turns[driver.node] = turns.get(driver.node, np.eye(3)) @ _turn(driver.axis, wire.angles.get(driver.name, 0.0))
     units: list[np.ndarray] = []
     scales: list[float] = []
     for node, parent in enumerate(rig.node_parents):

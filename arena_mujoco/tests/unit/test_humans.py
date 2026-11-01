@@ -388,6 +388,18 @@ _ISAAC_CASES = {
         (0.0, 0.0, 0.0),
         {'shin_turn': 0.5},
     ),
+    'two_drivers_one_bone': (
+        make_rig(
+            _PELVIS,
+            drivers={
+                'shin_pitch': {'bone': 'LeftLeg', 'from': 'angle', 'axis': [0.0, 1.0, 0.0]},
+                'shin_roll': {'bone': 'LeftLeg', 'from': 'angle', 'axis': [1.0, 0.0, 0.0]},
+            },
+        ),
+        {'pelvis': _axis_quaternion(2, 0.4)},
+        (0.0, 0.0, 0.0),
+        {'shin_pitch': 0.5, 'shin_roll': -0.3},
+    ),
 }
 
 
