@@ -142,6 +142,7 @@ class RobotEntry:
     urdf_sensors: dict[str, UrdfSensor]
     sensors: tuple[SensorSpec, ...]
     initial_positions: dict[str, float] = field(default_factory=dict)
+    mimics: dict[str, tuple[str, float, float]] = field(default_factory=dict)
 
 
 _robots: dict[tuple[int, str], RobotEntry] = {}
@@ -222,6 +223,22 @@ def _initial_positions(urdf_path: str) -> dict[str, float]:
                 if name and state.get('name') == 'position' and param is not None and param.text:
                     positions[name.replace('-', '_')] = float(param.text)
     return positions
+
+
+def _mimics(urdf_path: str) -> dict[str, tuple[str, float, float]]:
+    """Follower joint to (leader joint, multiplier, offset) from each URDF mimic element."""
+    mimics: dict[str, tuple[str, float, float]] = {}
+    for joint in ET.parse(urdf_path).getroot().findall('joint'):
+        mimic = joint.find('mimic')
+        name = joint.get('name')
+        if mimic is None or not name or not mimic.get('joint'):
+            continue
+        mimics[name.replace('-', '_')] = (
+            mimic.attrib['joint'].replace('-', '_'),
+            float(mimic.get('multiplier', '1')),
+            float(mimic.get('offset', '0')),
+        )
+    return mimics
 
 
 def _mujoco_compat(urdf_path: str) -> tuple[str, dict[str, tuple[str, ...]], dict[str, UrdfSensor]]:
@@ -409,6 +426,7 @@ def _spawn_urdf_cb(
         urdf_sensors=sensors,
         sensors=tuple(SensorSpec(name=item.name, type=item.type, topic=item.topic, frame=item.frame, sensor=item.sensor or None) for item in request.sensors),
         initial_positions=_initial_positions(request.urdf_path),
+        mimics=_mimics(request.urdf_path),
     )
 
     try:

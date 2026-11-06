@@ -45,6 +45,8 @@ class _Robot:
         self._model: mujoco.MjModel | None = None
         self._staged: dict[int, float] = {}
         self.pub: rclpy.publisher.Publisher | None = None
+        self.mimics: tuple[str, ...] = ()
+        self.mimic_pub: rclpy.publisher.Publisher | None = None
         self.sub_vel: rclpy.subscription.Subscription | None = None
         self.sub_pos: rclpy.subscription.Subscription | None = None
 
@@ -100,13 +102,16 @@ class _Robot:
             data.ctrl[actuator_id] = value
         if self.pub is None:
             return
-        self.pub.publish(self._joint_state_msg(model, data, sim_time))
+        self.pub.publish(self._joint_state_msg(model, data, sim_time, self.joint_names))
+        if self.mimic_pub is not None:
+            self.mimic_pub.publish(self._joint_state_msg(model, data, sim_time, self.mimics))
 
     def _joint_state_msg(
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
         sim_time: float,
+        joint_names: tuple[str, ...],
     ) -> sensor_msgs.msg.JointState:
         msg = sensor_msgs.msg.JointState()
         msg.header.stamp = _make_stamp(sim_time)
@@ -114,7 +119,7 @@ class _Robot:
         positions: list[float] = []
         velocities: list[float] = []
         efforts: list[float] = []
-        for joint in self.joint_names:
+        for joint in joint_names:
             jnt_id = self._joint_ids.get(joint)
             if jnt_id is None:
                 continue
@@ -168,6 +173,7 @@ def _limit_force(act: mujoco.MjsActuator, joint: mujoco.MjsJoint) -> None:
 
 def _add_position_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str) -> None:
     """Add a position-servo actuator (kp position feedback, kv damping) targeting joint."""
+    joint.actgravcomp = True
     act = spec.add_actuator()
     act.name = name
     act.trntype = mujoco.mjtTrn.mjTRN_JOINT
@@ -192,6 +198,28 @@ def _add_velocity_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: st
     _limit_force(act, joint)
 
 
+def _compensate_gravity(root: mujoco.MjsBody, driven: set[str]) -> None:
+    """Cancel gravity on every body below a position-driven joint, routed through those joints' actuator force."""
+    stack = [(root, False)]
+    while stack:
+        body, below = stack.pop()
+        below = below or any(j.name in driven for j in body.joints)
+        if below:
+            body.gravcomp = 1.0
+        stack.extend((child, below) for child in body.bodies)
+
+
+def _add_mimic(spec: mujoco.MjSpec, follower: str, leader: str, multiplier: float, offset: float) -> None:
+    """Constrain follower = offset + multiplier * leader with a joint equality."""
+    eq = spec.add_equality()
+    eq.name = f'{follower}_mimic'
+    eq.type = mujoco.mjtEq.mjEQ_JOINT
+    eq.objtype = mujoco.mjtObj.mjOBJ_JOINT
+    eq.name1 = follower
+    eq.name2 = leader
+    eq.data[:2] = [offset, multiplier]
+
+
 def _pre_compile(
     env_id: int,
     spec: mujoco.MjSpec,
@@ -199,14 +227,18 @@ def _pre_compile(
     robot_entry: RobotEntry,
     joint_names: list[str],
 ) -> None:
-    """Add position+velocity actuators per actuated joint, record the actuator map."""
+    """Add actuators per actuated joint, mimic equalities and gravity compensation, record the actuator map."""
     joints = {j.name: j for j in _joints_under(robot_root_body) if j.name}
     attached = sorted(joints)
     actuator_map: dict[str, tuple[str, str]] = {}
     mjcf_map: dict[str, str] = {}
+    driven: set[str] = set()
     for urdf_joint in joint_names:
         joint_mjcf = _match_joint(attached, urdf_joint)
         if joint_mjcf is None:
+            continue
+        if urdf_joint in robot_entry.mimics:
+            mjcf_map[urdf_joint] = joint_mjcf
             continue
         ifaces = robot_entry.command_interfaces.get(urdf_joint) or ('velocity',)
         add_pos = 'position' in ifaces
@@ -214,10 +246,17 @@ def _pre_compile(
         pos_name, vel_name = _actuator_names(joint_mjcf)
         if add_pos:
             _add_position_actuator(spec, joints[joint_mjcf], pos_name)
+            driven.add(joint_mjcf)
         if add_vel:
             _add_velocity_actuator(spec, joints[joint_mjcf], vel_name)
         actuator_map[urdf_joint] = (pos_name if add_pos else '', vel_name if add_vel else '')
         mjcf_map[urdf_joint] = joint_mjcf
+    for follower, (leader, multiplier, offset) in robot_entry.mimics.items():
+        follower_mjcf = mjcf_map.get(follower)
+        leader_mjcf = _match_joint(attached, leader)
+        if follower_mjcf is not None and leader_mjcf is not None:
+            _add_mimic(spec, follower_mjcf, leader_mjcf, multiplier, offset)
+    _compensate_gravity(robot_root_body, driven)
     _pending[robot_entry.prim_name] = actuator_map
     _pending_mjcf[robot_entry.prim_name] = mjcf_map
 
@@ -263,6 +302,9 @@ def _post_spawn(
     node = hooks.get_node()
 
     robot.pub = node.create_publisher(sensor_msgs.msg.JointState, f'{ns}/mujoco/joint_states', 10)
+    robot.mimics = tuple(follower for follower in robot_entry.mimics if follower in robot.mjcf_joints)
+    if robot.mimics:
+        robot.mimic_pub = node.create_publisher(sensor_msgs.msg.JointState, robot_entry.joint_states_topic, 10)
     robot.sub_vel = node.create_subscription(
         sensor_msgs.msg.JointState,
         f'{ns}/mujoco/joint_commands_velocity',
@@ -285,6 +327,8 @@ def _despawn(env_id: int, robot_entry: RobotEntry) -> None:
             continue
         if robot.pub is not None:
             node.destroy_publisher(robot.pub)
+        if robot.mimic_pub is not None:
+            node.destroy_publisher(robot.mimic_pub)
         if robot.sub_vel is not None:
             node.destroy_subscription(robot.sub_vel)
         if robot.sub_pos is not None:
