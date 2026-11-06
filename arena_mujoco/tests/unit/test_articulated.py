@@ -49,8 +49,8 @@ def _cabinet(tmp_path: Path, x: float = 0.0) -> SpawnArticulated.Request:
     return SpawnArticulated.Request(env_id=0, name=NAME, pose=pose, scale=Scale(x=1.0, y=1.0, z=1.0), links=[body, door])
 
 
-def _drive(reference: float, drive: bool, place: bool = False) -> list[float]:
-    request = DriveArticulated.Request(env_id=0, commands=[JointCommand(name=NAME, joints=['door'], reference=[reference], drive=[drive], place=[place])])
+def _drive(reference: float, drive: bool, place: bool = False, hold: bool = False) -> list[float]:
+    request = DriveArticulated.Request(env_id=0, commands=[JointCommand(name=NAME, joints=['door'], reference=[reference], drive=[drive], place=[place], hold=[hold])])
     (reading,) = _drive_articulated_cb(request, DriveArticulated.Response()).readings
     assert reading.found
     assert list(reading.joints) == ['door']
@@ -130,6 +130,28 @@ def test_placing_sets_the_joint_at_rest_and_a_recompile_keeps_the_angle_and_the_
     assert store.get_model(0).actuator('env_0_Obstacles_cabinet__door__drive').gainprm[0] == 0.0
 
 
+def test_a_held_door_stays_shut_under_a_push_and_a_recompile_until_the_hold_lets_go(store: SceneStore, tmp_path: Path):
+    assert _spawn_articulated_cb(_cabinet(tmp_path), SpawnArticulated.Response()).ret
+    model, data = store.get_model(0), store.get_data(0)
+    dof = model.joint('env_0_Obstacles_cabinet__door').dofadr[0]
+    assert _drive(0.0, True, hold=True) == pytest.approx([0.0], abs=1e-3)
+    data.qfrc_applied[dof] = 200.0
+    _run(store, 0.5)
+    assert _drive(0.0, True, hold=True) == pytest.approx([0.0], abs=0.01)
+    assert _add_prim(0, Prim(name='crate', scale=Scale(x=0.5, y=0.5, z=0.5)))
+    store.recompile(0)
+    model, data = store.get_model(0), store.get_data(0)
+    data.qfrc_applied[dof] = 200.0
+    _run(store, 0.5)
+    assert _drive(0.0, True, hold=True) == pytest.approx([0.0], abs=0.01)
+    data.qfrc_applied[dof] = 3.0
+    _drive(0.0, False)
+    assert tuple(model.joint('env_0_Obstacles_cabinet__door').range) == pytest.approx((0.0, 1.6))
+    _run(store, 0.3)
+    data.qfrc_applied[dof] = 0.0
+    assert _drive(0.0, False)[0] > 0.1
+
+
 def test_deleting_the_object_takes_its_drives_and_excludes_and_frees_its_name(store: SceneStore, tmp_path: Path):
     assert _spawn_articulated_cb(_cabinet(tmp_path), SpawnArticulated.Response()).ret
     assert not _spawn_articulated_cb(_cabinet(tmp_path), SpawnArticulated.Response()).ret
@@ -138,7 +160,7 @@ def test_deleting_the_object_takes_its_drives_and_excludes_and_frees_its_name(st
     store.recompile(0)
     model = store.get_model(0)
     assert (model.nu, model.nexclude, model.njnt) == (0, 0, 0)
-    request = DriveArticulated.Request(env_id=0, commands=[JointCommand(name=NAME, joints=['door'], reference=[0.0], drive=[False], place=[False])])
+    request = DriveArticulated.Request(env_id=0, commands=[JointCommand(name=NAME, joints=['door'], reference=[0.0], drive=[False], place=[False], hold=[False])])
     assert not _drive_articulated_cb(request, DriveArticulated.Response()).readings[0].found
     assert _spawn_articulated_cb(_cabinet(tmp_path), SpawnArticulated.Response()).ret
 

@@ -25,18 +25,22 @@ BOUNCE_FREQUENCY = 160.0
 BOUNCE_SOLMIX = 1e3
 BOUNCE_BISECTIONS = 30
 MAX_RESTITUTION = 0.99
+HOLD_SLACK = 1e-4
 
 
 @dataclass
 class _Joint:
-    """One MJCF joint of an object, its drive actuator and gains, and whether the drive is on."""
+    """One MJCF joint of an object, its drive actuator and gains, its limits, whether the drive is on and whether its range is locked."""
 
     name: str
     actuator: str
     stiffness: float
     damping: float
     wraps: bool
+    lower: float = 0.0
+    upper: float = 0.0
     on: bool = False
+    held: bool = False
 
 
 @dataclass
@@ -105,7 +109,7 @@ def _add_link(spec: mujoco.MjSpec, cache: AssetCache, root: str, parent: mujoco.
     joint.armature = dynamics.armature
     joint.stiffness = [dynamics.spring_stiffness, 0.0, 0.0]
     joint.springref = math.degrees(dynamics.spring_rest) if link.type != ArticulatedLink.PRISMATIC and spec.compiler.degree else dynamics.spring_rest
-    entry = _Joint(joint.name, f'{joint.name}{DRIVE_SUFFIX}', dynamics.stiffness, dynamics.drive_damping, link.type == ArticulatedLink.CONTINUOUS)
+    entry = _Joint(joint.name, f'{joint.name}{DRIVE_SUFFIX}', dynamics.stiffness, dynamics.drive_damping, link.type == ArticulatedLink.CONTINUOUS, link.lower, link.upper)
     actuator = spec.add_actuator()
     actuator.name = entry.actuator
     actuator.trntype = mujoco.mjtTrn.mjTRN_JOINT
@@ -206,6 +210,13 @@ def _spawn_articulated_cb(request: SpawnArticulated.Request, response: SpawnArti
     return response
 
 
+def _set_range(model: mujoco.MjModel, spec: mujoco.MjSpec, joint: _Joint, lower: float, upper: float) -> None:
+    """Write a joint's limits into the live model and the spec."""
+    model.jnt_range[model.joint(joint.name).id] = [lower, upper]
+    angular = model.jnt_type[model.joint(joint.name).id] == mujoco.mjtJoint.mjJNT_HINGE and spec.compiler.degree
+    spec.joint(joint.name).range = [math.degrees(lower), math.degrees(upper)] if angular else [lower, upper]
+
+
 def _drive_articulated_cb(request: DriveArticulated.Request, response: DriveArticulated.Response) -> DriveArticulated.Response:
     store = get_scene_store()
     env_id = int(request.env_id)
@@ -218,12 +229,17 @@ def _drive_articulated_cb(request: DriveArticulated.Request, response: DriveArti
         if obj is None or model is None or data is None or spec is None:
             continue
         placed = False
-        for name, reference, drive, place in zip(command.joints, command.reference, command.drive, command.place, strict=True):
+        for name, reference, drive, place, hold in zip(command.joints, command.reference, command.drive, command.place, command.hold, strict=True):
             joint = obj.joints.get(name)
             if joint is None:
                 continue
             joint_id = model.joint(joint.name).id
             qpos = int(model.jnt_qposadr[joint_id])
+            if hold != joint.held and not joint.wraps:
+                lower, upper = (max(joint.lower, reference - HOLD_SLACK), min(joint.upper, reference + HOLD_SLACK)) if hold else (joint.lower, joint.upper)
+                _set_range(model, spec, joint, lower, upper)
+                joint.held = hold
+                store.note_model_edit(env_id)
             if place:
                 data.qpos[qpos] = reference
                 data.qvel[int(model.jnt_dofadr[joint_id])] = 0.0

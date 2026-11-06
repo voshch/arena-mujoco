@@ -6,3 +6,5 @@ float64[] reference
 bool[] drive
 # set onto the reference at rest before stepping on
 bool[] place
+# range locked at the reference while set
+bool[] hold
