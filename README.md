@@ -215,6 +215,8 @@ The `control.py` module wires per-joint position and velocity actuators into the
 
 - Position actuator: `gaintype=FIXED kp=1000`, `biastype=AFFINE [0, -kp, -kv]` (stiff position servo).
 - Velocity actuator: `gaintype=FIXED kv=100`, `biastype=AFFINE [0, 0, -kv]` (damped velocity servo).
+- Gravity compensation: every joint with a position actuator sets `actgravcomp`, and every body at or below such a joint gets `gravcomp=1`. The compensating force goes through the joint's actuator force and is clamped to its effort range with the servo force, so a heavy payload (TIAGo's `torso_lift_joint`, an arm) holds its commanded target instead of sagging against the P gain, and an effort limit below the payload's weight still shows. Velocity-driven joints (wheels) and free bases are not compensated.
+- Mimic joints: a URDF `<mimic joint= multiplier= offset=>` becomes a joint equality (`follower = offset + multiplier * leader`, named `<follower>_mimic`) and the follower gets no actuator. It is published in `joint_states` like any other joint and follows the leader's command.
 
 ROS topics (per-robot, under the robot's namespace):
 
@@ -222,7 +224,7 @@ ROS topics (per-robot, under the robot's namespace):
 | --- | --- | --- | --- |
 | `<ns>/mujoco/joint_commands_velocity` | in | `sensor_msgs/JointState` | Velocity setpoints; `.velocity` fields written to velocity actuator `data.ctrl` |
 | `<ns>/mujoco/joint_commands_position` | in | `sensor_msgs/JointState` | Position setpoints; `.position` fields written to position actuator `data.ctrl` |
-| `<ns>/mujoco/joint_states` | out | `sensor_msgs/JointState` | `qpos`, `qvel`, `qfrc_actuator` from the live model, published at ~100 Hz |
+| `<ns>/mujoco/joint_states` | out | `sensor_msgs/JointState` | `qpos`, `qvel`, `qfrc_actuator` for every URDF joint, mimic followers included, from the live model, published at ~100 Hz |
 
 The external `controller_manager` (launched by `MujocoSimulator._launch_robot_stack`) provides the actual control law. The server side only reads setpoints from the command topics and exposes actuation state back to the bridge.
 
