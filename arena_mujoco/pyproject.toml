@@ -4,7 +4,7 @@ version = "0.0.0"
 dependencies = [
     "coacd",
     "glfw",
-    "mujoco==3.9.0",
+    "mujoco==4.0.0",
     "numpy",
     "pillow",
     "pycollada",
