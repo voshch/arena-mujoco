@@ -74,6 +74,7 @@ def generate_launch_description():
     LaunchArgument(
         name='headless',
         default_value='False',
+        description='Run the MuJoCo server without its viewer window.',
     )
 
     return LaunchDescription(
