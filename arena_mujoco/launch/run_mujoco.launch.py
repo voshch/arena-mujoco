@@ -5,7 +5,7 @@ import re
 import subprocess
 
 import launch
-from arena_bringup.substitutions import LaunchArgument
+from arena_rclpy_mixins.launch_argument import LaunchArgument
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess, LogInfo, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -68,7 +68,7 @@ def generate_launch_description():
     LaunchArgument(
         name='log_level',
         default_value='info',
-        description='Logging level',
+        description='Log level.',
     )
 
     LaunchArgument(
@@ -80,11 +80,6 @@ def generate_launch_description():
     return LaunchDescription(
         [
             *ld,
-            launch.actions.DeclareLaunchArgument(
-                'log_level',
-                default_value=['info'],
-                description='Logging level',
-            ),
             OpaqueFunction(function=_server),
         ]
     )
