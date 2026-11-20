@@ -217,8 +217,14 @@ def test_contact_reports_touching_bodies_outside_the_own_tree(store: SceneStore)
     (contact,) = message.contacts
     assert (contact.collision1.name, contact.collision2.name) == ('stacked', 'resting')
     assert len(contact.positions) == len(contact.depths) == 4
+    assert len(contact.wrenches) == len(contact.positions)
     assert all(position.z == pytest.approx(0.2, abs=0.01) for position in contact.positions)
     assert all(normal.z == pytest.approx(1.0) for normal in contact.normals)
+    assert all(wrench.body_1_name.data == 'stacked' for wrench in contact.wrenches)
+    assert all(wrench.body_2_name.data == 'resting' for wrench in contact.wrenches)
+    assert sum(wrench.body_1_wrench.force.z for wrench in contact.wrenches) > 0.0
+    assert all(wrench.body_1_wrench.force.z == pytest.approx(-wrench.body_2_wrench.force.z) for wrench in contact.wrenches)
+    assert all(wrench.body_1_wrench.torque.x == pytest.approx(-wrench.body_2_wrench.torque.x) for wrench in contact.wrenches)
     assert contacts_message(model, data, mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'hovering'), Header()).contacts == []
 
 
@@ -322,3 +328,39 @@ def test_near_plane_stays_at_a_centimeter_with_bodies_parked_far_away(store: Sce
     rig, model, data = _scene(store, _camera())
     assert model.vis.map.znear * model.stat.extent == pytest.approx(0.01)
     assert rig.depth(model, data)[120, 160] == pytest.approx(3.9, abs=0.02)
+
+
+def test_contact_sensor_on_tool_detects_child_finger_contact(store: SceneStore):
+    grey = [0.5, 0.5, 0.5, 1.0]
+
+    def tool_with_finger(spec: mujoco.MjSpec) -> mujoco.MjsBody:
+        tool = spec.worldbody.add_body(name='tool', pos=[0.0, 0.0, 1.0])
+        finger = tool.add_body(name='finger')
+        finger.add_geom(
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=[0.1, 0.1, 0.1],
+            rgba=grey,
+        )
+        return tool
+
+    store.add_body(0, tool_with_finger)
+    store.add_body(
+        0,
+        _box('handle', (0.19, 0.0, 1.0), (0.1, 0.1, 0.1), grey, free=True),
+    )
+    store.recompile(0)
+    store.step(1)
+
+    model, data = store.get_model(0), store.get_data(0)
+    tool_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'tool')
+
+    rows = outside_contacts(model, data, tool_id)
+    assert len(rows) > 0
+
+    message = contacts_message(model, data, tool_id, Header(frame_id='arm_tool0'))
+    assert len(message.contacts) > 0
+
+    contact = message.contacts[0]
+    assert {contact.collision1.name, contact.collision2.name} == {'finger', 'handle'}
+    assert len(contact.wrenches) == len(contact.positions)
+    assert len(contact.wrenches) > 0
